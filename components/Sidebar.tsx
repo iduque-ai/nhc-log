@@ -242,11 +242,11 @@ const DataSources: React.FC<{
           <div className="max-h-40 overflow-y-auto space-y-1 pr-2">
               {fileInfos.map(file => (
                 <div key={file.id} className="flex justify-between items-center bg-gray-800 p-2 rounded-md">
-                  <div className="text-sm">
+                  <div className="text-sm flex-1 min-w-0 pr-2">
                     <p className="font-medium text-gray-300 truncate" title={file.name}>{file.name}</p>
                     <p className="text-xs text-gray-500">{formatFileSize(file.size)}</p>
                   </div>
-                  <button onClick={() => onRemoveFile(file.id)} disabled={disabled} className="text-gray-500 hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed">&times;</button>
+                  <button onClick={() => onRemoveFile(file.id)} disabled={disabled} className="text-gray-500 hover:text-red-400 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0">&times;</button>
                 </div>
               ))}
           </div>

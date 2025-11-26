@@ -7,11 +7,152 @@ import { LogViewer } from './components/LogViewer.tsx';
 import { LogEntry, FilterState, LogTab, LogLevel, FileInfo } from './types.ts';
 import { evaluateKeywordQuery } from './utils/helpers.ts';
 
+const ASTERISK_LOG_REGEX = /^(?<timestamp>\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?<hostname>\S+)\s+(?<daemon>[^\[:]+)(?:\[(?<pid>\d+)\])?:\s+(?<level>\w+)(?:\[\d+\])?:\s+(?<module>[^:]+:\d+)\s+in\s+(?<functionName>[^:]+):\s+(?<message>.*)$/;
+
+const NIKO_LOG_REGEX = /^(?<timestamp>\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?<hostname>\S+)\s+(?<daemon>[^\[:]+)(?:\[(?<pid>\d+)\])?:\s+(?<level>[A-Z]+)\s+(?<module>\S+)\s+-\s+(?<message>.*)$/;
+
 const LOG_LINE_REGEX = /^(?<timestamp>\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(?<hostname>\S+)\s+(?<daemon>\S+?)(?:\[(?<pid>\d+)\])?:\s+(?:\[(?<level>\w+)\])?\s*(?:\[(?<module>[^\]]+)\])?(?::)?\s*(?<message>.*)$/;
 
-const parseLogLine = (line: string, id: number): LogEntry | null => {
+// Updated to support both "Sep 11..." and ISO "2025-09-11..." timestamps
+const SYSLOG_FILE_REGEX = /^(?<timestamp>\S+(?:\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)?)\s+(?<hostname>\S+)\s+(?<message>.*)$/;
+
+const determineLevelFromMessage = (message: string): LogLevel => {
+    const upperMsg = message.toUpperCase();
+    if (upperMsg.includes('CRITICAL')) return LogLevel.CRITICAL;
+    if (upperMsg.includes('ERROR') || upperMsg.includes('ERR')) return LogLevel.ERROR;
+    if (upperMsg.includes('WARNING') || upperMsg.includes('WARN')) return LogLevel.WARNING;
+    if (upperMsg.includes('NOTICE')) return LogLevel.NOTICE;
+    if (upperMsg.includes('INFO')) return LogLevel.INFO;
+    if (upperMsg.includes('DEBUG')) return LogLevel.DEBUG;
+    if (upperMsg.includes('VERBOSE')) return LogLevel.VERBOSE;
+    return LogLevel.UNKNOWN;
+};
+
+const parseTimestamp = (timestampStr: string): Date | null => {
+    // Handle timestamps without a year by assuming the current year.
+    // Per user request, log times are in UTC, so append 'UTC' to parse correctly.
+    // Check if it's a syslog style (Sep 11 ...) or ISO style (2024-...)
+    
+    let parsedTimestamp;
+    
+    if (/^\w{3}\s+\d/.test(timestampStr)) {
+         const parsed = new Date(`${timestampStr} ${new Date().getFullYear()} UTC`);
+         if (!isNaN(parsed.getTime())) return parsed;
+    }
+
+    if (/^\d+$/.test(timestampStr)) {
+        // Numeric timestamp is likely epoch milliseconds, which is already UTC.
+        parsedTimestamp = new Date(parseInt(timestampStr, 10));
+    } else {
+        // For string timestamps, attempt to parse as UTC if no timezone is specified.
+        if (!/Z|[+-]\d{2}(:?\d{2})?$/.test(timestampStr)) {
+            // For ISO-like strings (containing 'T'), appending 'Z' is the standard for UTC.
+            // For other formats, appending ' UTC' often works.
+            const utcTimestampString = timestampStr.includes('T')
+                ? `${timestampStr}Z`
+                : `${timestampStr} UTC`;
+            parsedTimestamp = new Date(utcTimestampString);
+
+            // If parsing as UTC fails, fall back to default browser parsing
+            if (isNaN(parsedTimestamp.getTime())) {
+                parsedTimestamp = new Date(timestampStr);
+            }
+        } else {
+            // Timestamp already has timezone info.
+            parsedTimestamp = new Date(timestampStr);
+        }
+    }
+
+    if (isNaN(parsedTimestamp.getTime())) return null;
+    return parsedTimestamp;
+}
+
+const extractDaemonFromFileName = (fileName: string): string => {
+    const parts = fileName.split('.');
+    // Look for a segment that matches YYYYMMDD (6-8 digits) OR YYYY-MM-DD
+    const dateIndex = parts.findIndex(part => /^\d{6,8}$|^\d{4}-\d{2}-\d{2}$/.test(part));
+    
+    if (dateIndex !== -1 && dateIndex + 1 < parts.length) {
+        return parts[dateIndex + 1];
+    }
+    return '';
+};
+
+const parseLogLine = (line: string, id: number, fileName: string): LogEntry | null => {
   if (!line || line.trim() === '') return null;
 
+  // 1. Special Handling for .syslog files
+  if (fileName.includes('.syslog')) {
+      const syslogMatch = line.match(SYSLOG_FILE_REGEX);
+      if (syslogMatch?.groups) {
+          const { timestamp, hostname, message } = syslogMatch.groups;
+          const parsedTimestamp = parseTimestamp(timestamp);
+          if (!parsedTimestamp) return null;
+
+          return {
+              id,
+              timestamp: parsedTimestamp,
+              hostname,
+              daemon: extractDaemonFromFileName(fileName),
+              pid: 0,
+              level: determineLevelFromMessage(message),
+              module: 'unknown',
+              functionName: 'unknown',
+              message: message.trim(),
+          };
+      }
+      // If regex fails, fall through or return null? Fall through in case other regexes catch it.
+  }
+
+  // 2. Asterisk Format
+  const asteriskMatch = line.match(ASTERISK_LOG_REGEX);
+  if (asteriskMatch?.groups) {
+    const { timestamp, hostname, daemon, pid, level, module, functionName, message } = asteriskMatch.groups;
+    const logLevel = Object.values(LogLevel).includes(level?.toUpperCase() as LogLevel)
+      ? level.toUpperCase() as LogLevel
+      : LogLevel.UNKNOWN;
+
+    const parsedTimestamp = parseTimestamp(timestamp);
+    if (!parsedTimestamp) return null;
+
+    return {
+      id,
+      timestamp: parsedTimestamp,
+      hostname,
+      daemon: daemon.trim(),
+      pid: pid ? parseInt(pid, 10) : 0,
+      level: logLevel,
+      module: module || 'unknown',
+      functionName: functionName || 'unknown',
+      message: message.trim(),
+    };
+  }
+
+  // 3. Niko/Coco Format (Daemon[PID]: LEVEL Module - Message)
+  const nikoMatch = line.match(NIKO_LOG_REGEX);
+  if (nikoMatch?.groups) {
+      const { timestamp, hostname, daemon, pid, level, module, message } = nikoMatch.groups;
+      const logLevel = Object.values(LogLevel).includes(level?.toUpperCase() as LogLevel)
+      ? level.toUpperCase() as LogLevel
+      : LogLevel.UNKNOWN;
+      
+      const parsedTimestamp = parseTimestamp(timestamp);
+      if (!parsedTimestamp) return null;
+
+      return {
+          id,
+          timestamp: parsedTimestamp,
+          hostname,
+          daemon: daemon.trim(),
+          pid: pid ? parseInt(pid, 10) : 0,
+          level: logLevel,
+          module: module || 'unknown',
+          functionName: 'unknown',
+          message: message.trim(),
+      };
+  }
+
+  // 4. Standard Generic Log Line
   const match = line.match(LOG_LINE_REGEX);
   if (match?.groups) {
     const { timestamp, hostname, daemon, pid, level, module, message } = match.groups;
@@ -19,10 +160,8 @@ const parseLogLine = (line: string, id: number): LogEntry | null => {
       ? level.toUpperCase() as LogLevel
       : LogLevel.UNKNOWN;
 
-    // Handle timestamps without a year by assuming the current year.
-    // Per user request, log times are in UTC, so append 'UTC' to parse correctly.
-    const parsedTimestamp = new Date(`${timestamp} ${new Date().getFullYear()} UTC`);
-    if (isNaN(parsedTimestamp.getTime())) return null;
+    const parsedTimestamp = parseTimestamp(timestamp);
+    if (!parsedTimestamp) return null;
 
     let cleanedMessage = message.trim();
     let parsedFunctionName = 'unknown';
@@ -36,11 +175,17 @@ const parseLogLine = (line: string, id: number): LogEntry | null => {
         cleanedMessage = cleanedMessage.replace(functionRegex, '').trim();
     }
 
+    let extractedDaemon = daemon.trim();
+    if (!extractedDaemon || extractedDaemon.toLowerCase() === 'unknown') {
+        const fromFile = extractDaemonFromFileName(fileName);
+        if (fromFile) extractedDaemon = fromFile;
+    }
+
     return {
       id,
       timestamp: parsedTimestamp,
       hostname,
-      daemon: daemon.trim(),
+      daemon: extractedDaemon,
       pid: pid ? parseInt(pid, 10) : 0,
       level: logLevel,
       module: module || 'unknown',
@@ -49,42 +194,28 @@ const parseLogLine = (line: string, id: number): LogEntry | null => {
     };
   }
   
-  const simpleMatch = line.match(/^(?<timestamp>\S+)\s+(?<hostname>\S+)\s+(?<daemon>\S+?)(?:\[(?<pid>\d+)\])?:\s+(?<message>.*)$/);
+  // 5. Simple/Fallback Match (Handles standard syslog without explicit Level column)
+  // Updated regex to support both "Sep 11..." and ISO timestamps
+  const simpleMatch = line.match(/^(?<timestamp>\S+(?:\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)?)\s+(?<hostname>\S+)\s+(?<daemon>[^:\s]+)(?:\[(?<pid>\d+)\])?:\s+(?<message>.*)$/);
+  
   if (simpleMatch?.groups) {
     const { timestamp, hostname, daemon, pid, message } = simpleMatch.groups;
     
-    // Per user request, treat timestamps without timezone info as UTC.
-    let parsedTimestamp;
-    if (/^\d+$/.test(timestamp)) {
-        // Numeric timestamp is likely epoch milliseconds, which is already UTC.
-        parsedTimestamp = new Date(parseInt(timestamp, 10));
-    } else {
-        // For string timestamps, attempt to parse as UTC if no timezone is specified.
-        if (!/Z|[+-]\d{2}(:?\d{2})?$/.test(timestamp)) {
-            // For ISO-like strings (containing 'T'), appending 'Z' is the standard for UTC.
-            // For other formats, appending ' UTC' often works.
-            const utcTimestampString = timestamp.includes('T')
-                ? `${timestamp}Z`
-                : `${timestamp} UTC`;
-            parsedTimestamp = new Date(utcTimestampString);
-
-            // If parsing as UTC fails, fall back to default browser parsing to avoid breaking valid but unusual formats.
-            if (isNaN(parsedTimestamp.getTime())) {
-                parsedTimestamp = new Date(timestamp);
-            }
-        } else {
-            // Timestamp already has timezone info.
-            parsedTimestamp = new Date(timestamp);
-        }
+    const parsedTimestamp = parseTimestamp(timestamp);
+    if (!parsedTimestamp) return null;
+    
+    let extractedDaemon = daemon.trim();
+    // Fallback if daemon is 'unknown' or empty
+    if (!extractedDaemon || extractedDaemon.toLowerCase() === 'unknown') {
+        const fromFile = extractDaemonFromFileName(fileName);
+        if (fromFile) extractedDaemon = fromFile;
     }
 
-    if (isNaN(parsedTimestamp.getTime())) return null;
-    
     return {
       id,
       timestamp: parsedTimestamp,
       hostname,
-      daemon: daemon.trim(),
+      daemon: extractedDaemon,
       pid: pid ? parseInt(pid, 10) : 0,
       level: LogLevel.UNKNOWN,
       module: 'unknown',
@@ -146,7 +277,7 @@ const App: React.FC = () => {
             const textContent = await zipEntry.async('string');
             const parsedLogs = textContent
                 .split('\n')
-                .map((line) => parseLogLine(line, logIdCounter.current++))
+                .map((line) => parseLogLine(line, logIdCounter.current++, zipEntry.name))
                 .filter((log): log is LogEntry => log !== null);
             
             newFileInfos.push({
@@ -163,7 +294,7 @@ const App: React.FC = () => {
             const textContent = ungzip(new Uint8Array(buffer), { to: 'string' }) as string;
             const parsedLogs = textContent
                 .split('\n')
-                .map((line: string) => parseLogLine(line, logIdCounter.current++))
+                .map((line: string) => parseLogLine(line, logIdCounter.current++, file.name))
                 .filter((log): log is LogEntry => log !== null);
             
             newFileInfos.push({
@@ -180,7 +311,7 @@ const App: React.FC = () => {
         const textContent = await file.text();
         const parsedLogs = textContent
           .split('\n')
-          .map((line) => parseLogLine(line, logIdCounter.current++))
+          .map((line) => parseLogLine(line, logIdCounter.current++, file.name))
           .filter((log): log is LogEntry => log !== null);
         
         newFileInfos.push({

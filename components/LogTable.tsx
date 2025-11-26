@@ -1,5 +1,4 @@
-
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
 import { LogEntry, LogLevel } from '../types.ts';
 import { exportToCsv, exportToTxt, formatTimestamp, extractKeywordsFromQuery } from '../utils/helpers.ts';
 
@@ -54,6 +53,19 @@ const COLUMN_NAMES: Record<typeof ALL_COLUMNS[number], string> = {
     functionName: 'Function Name',
 };
 
+// Map column keys to specific width classes to ensure alignment.
+// Using max-w-[X] combined with w-[X] enforces fixed width and triggers truncation for overflow.
+const COLUMN_WIDTHS: Record<string, string> = {
+    timestamp: 'w-48 min-w-[12rem]',
+    level: 'w-28', // Fixed width approx 112px, enough for UNKNOWN
+    daemon: 'w-36 max-w-[9rem]', // Reduced by 40% from 15rem to 9rem
+    hostname: 'w-32 max-w-[8rem]',
+    pid: 'w-20',
+    module: 'w-36 max-w-[9rem]', // Reduced by 40% from 15rem to 9rem
+    functionName: 'w-40 max-w-[10rem]',
+    message: 'w-auto'
+};
+
 const ColumnSelector: React.FC<{
     visibleColumns: Record<string, boolean>;
     setVisibleColumns: (cols: Record<string, boolean>) => void;
@@ -85,9 +97,7 @@ const ColumnSelector: React.FC<{
                 <div className="absolute right-0 mt-2 w-56 bg-gray-800 border border-gray-600 rounded-md shadow-lg z-20">
                     <ul className="py-1">
                         {ALL_COLUMNS.map(col => {
-                            if (col === 'daemon' && totalDaemonCount <= 1) {
-                                return null;
-                            }
+                            // User request: Always allow selecting daemon column
                             return (
                                 <li key={col} className="px-3 py-2 hover:bg-gray-700 cursor-pointer text-gray-300 text-sm">
                                     <label className="flex items-center space-x-2">
@@ -151,6 +161,7 @@ export const LogTable: React.FC<LogTableProps> = ({
   
   // Track previous page to determine scrolling direction
   const prevPageRef = useRef(currentPage);
+  const prevTabIdRef = useRef(tabId);
 
   // Pagination input state
   const [pageInput, setPageInput] = useState(currentPage.toString());
@@ -320,36 +331,34 @@ export const LogTable: React.FC<LogTableProps> = ({
   }, [targetScrollId, currentPage, data, onScrollComplete, logsPerPage, onPageChange, onScrollChange, scrollToLogId, internalScrollId]);
 
   // Restore scroll position when switching tabs/pages
-  useEffect(() => {
-    // Always track the current page, even if we are in "targeting" mode. 
-    // This prevents stale previousPage values from triggering unwanted scroll resets when targeting finishes.
+  useLayoutEffect(() => {
     const previousPage = prevPageRef.current;
+    const previousTabId = prevTabIdRef.current;
+
     prevPageRef.current = currentPage;
+    prevTabIdRef.current = tabId;
 
     if (targetScrollId !== null) return;
 
-    const isPageChange = previousPage !== currentPage;
-    const isGoingBack = currentPage < previousPage;
-    
-    // Defer scroll restoration to ensure the DOM has updated
-    const timerId = setTimeout(() => {
-        if (tableContainerRef.current) {
+    if (tableContainerRef.current) {
+        if (previousTabId !== tabId) {
+             // Tab switch: restore saved position
+             tableContainerRef.current.scrollTop = scrollTop;
+        } else {
+            // Same tab, check for page change
+            const isPageChange = previousPage !== currentPage;
+            const isGoingBack = currentPage < previousPage;
+
             if (isPageChange) {
                 if (isGoingBack) {
+                    // Set to bottom immediately before paint
                     tableContainerRef.current.scrollTop = tableContainerRef.current.scrollHeight;
                 } else {
                     tableContainerRef.current.scrollTop = 0;
                 }
-            } else {
-                tableContainerRef.current.scrollTop = scrollTop;
             }
         }
-    }, 0);
-
-    return () => clearTimeout(timerId);
-
-    // CRITICAL FIX: Removed 'scrollTop' from dependencies to prevent loop when user scrolls.
-    // Added 'tabId' to ensure we restore position when switching back to this tab.
+    }
   }, [paginatedData, targetScrollId, currentPage, tabId]);
 
 
@@ -360,22 +369,62 @@ export const LogTable: React.FC<LogTableProps> = ({
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
         const target = e.target as HTMLElement;
-        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable) {
+        const isInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable;
+        const isSearchFocused = document.activeElement === searchInputRef.current;
+
+        // Focus Search: Ctrl + F or /
+        if ((e.ctrlKey && e.key === 'f') || (e.key === '/' && !isInput)) {
+            e.preventDefault();
+            searchInputRef.current?.focus();
             return;
         }
 
-        if (e.key === 'PageUp') {
+        // Clear Search: Ctrl + L
+        if (e.ctrlKey && e.key === 'l') {
+             e.preventDefault();
+             onSearchQueryChange('');
+             return;
+        }
+
+        // Global Esc: Blur + Clear logic
+        // If search is NOT focused, and we press Esc, clear the search query (Esc x2 behavior part 2).
+        if (e.key === 'Escape' && !isSearchFocused && searchQuery) {
             e.preventDefault();
-            onPageChange(Math.min(currentPage + 1, totalPages)); // Next Page
-        } else if (e.key === 'PageDown') {
+            onSearchQueryChange('');
+            return;
+        }
+
+        if (isInput) {
+            return;
+        }
+
+        // Page Navigation
+        if (e.key === 'ArrowRight') {
             e.preventDefault();
-            onPageChange(Math.max(currentPage - 1, 1)); // Prev Page
+            if (e.ctrlKey) {
+                 onPageChange(Math.min(currentPage + 5, totalPages));
+            } else {
+                 onPageChange(Math.min(currentPage + 1, totalPages));
+            }
+        } else if (e.key === 'ArrowLeft') {
+            e.preventDefault();
+            if (e.ctrlKey) {
+                 onPageChange(Math.max(currentPage - 5, 1));
+            } else {
+                 onPageChange(Math.max(currentPage - 1, 1));
+            }
+        } else if (e.key === 'Home') {
+            e.preventDefault();
+            onPageChange(1);
+        } else if (e.key === 'End') {
+            e.preventDefault();
+            onPageChange(totalPages);
         }
     };
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [currentPage, totalPages, onPageChange]);
+  }, [currentPage, totalPages, onPageChange, searchQuery, onSearchQueryChange]);
 
   const handlePageInputSubmit = () => {
     let p = parseInt(pageInput, 10);
@@ -392,12 +441,6 @@ export const LogTable: React.FC<LogTableProps> = ({
   const handlePageInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
         handlePageInputSubmit();
-    } else if (e.key === 'PageUp') {
-        e.preventDefault();
-        handleNextPage();
-    } else if (e.key === 'PageDown') {
-        e.preventDefault();
-        handlePrevPage();
     } else if (e.key === 'Home') {
         e.preventDefault();
         onPageChange(1);
@@ -443,6 +486,24 @@ export const LogTable: React.FC<LogTableProps> = ({
   };
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+      const el = e.currentTarget;
+      const isAtEnd = el.selectionStart === el.value.length;
+      const isEmpty = el.value.length === 0;
+
+      // Esc: Blur
+      if (e.key === 'Escape') {
+          e.preventDefault();
+          el.blur();
+          return;
+      }
+      
+      // Clear: Ctrl + L
+      if (e.ctrlKey && e.key === 'l') {
+          e.preventDefault();
+          onSearchQueryChange('');
+          return;
+      }
+
       if (e.key === 'Enter') {
           // Add to history
           if (searchQuery.trim()) {
@@ -459,7 +520,21 @@ export const LogTable: React.FC<LogTableProps> = ({
           } else {
               handleNextMatch();
           }
-      } else if (e.key === 'ArrowUp') {
+      } 
+      
+      // Search Results Navigation: Alt + Down / Alt + Up
+      else if (e.altKey && e.key === 'ArrowDown') {
+          e.preventDefault();
+          handleNextMatch();
+      } else if (e.altKey && e.key === 'ArrowUp') {
+          e.preventDefault();
+          handlePrevMatch();
+      }
+
+      // History Navigation
+      else if (e.key === 'ArrowUp') {
+          if (!isAtEnd && !isEmpty) return;
+          
           e.preventDefault();
           if (searchHistory.length === 0) return;
 
@@ -476,6 +551,8 @@ export const LogTable: React.FC<LogTableProps> = ({
           }
           moveCursorToEnd();
       } else if (e.key === 'ArrowDown') {
+          if (!isAtEnd && !isEmpty) return;
+
           e.preventDefault();
           if (historyIndex === -1) return;
 
@@ -489,26 +566,7 @@ export const LogTable: React.FC<LogTableProps> = ({
               onSearchQueryChange(searchHistory[newIndex]);
           }
           moveCursorToEnd();
-      } else if (e.key === 'PageUp') {
-          e.preventDefault();
-          handlePrevMatch();
-      } else if (e.key === 'PageDown') {
-          e.preventDefault();
-          handleNextMatch();
-      } else if (e.key === 'Home') {
-          if (matchingIndices.length > 0) {
-              e.preventDefault();
-              setCurrentMatchPos(0);
-              setInternalScrollId(data[matchingIndices[0]].id);
-          }
-      } else if (e.key === 'End') {
-          if (matchingIndices.length > 0) {
-              e.preventDefault();
-              const lastIndex = matchingIndices.length - 1;
-              setCurrentMatchPos(lastIndex);
-              setInternalScrollId(data[matchingIndices[lastIndex]].id);
-          }
-      }
+      } 
   };
 
   const displayedColumns = ALL_COLUMNS.filter(col => visibleColumns[col]);
@@ -582,14 +640,14 @@ export const LogTable: React.FC<LogTableProps> = ({
             transition-colors duration-500
           `}
         >
-          <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-400 font-mono">{formatTimestamp(log.timestamp, selectedTimezone)}</td>
-          {visibleColumns.level && <td className="px-3 py-4 whitespace-nowrap"><span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${levelColorMap[log.level]}`}>{log.level}</span></td>}
-          {visibleColumns.daemon && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.daemon}</td>}
-          {visibleColumns.hostname && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.hostname}</td>}
-          {visibleColumns.pid && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.pid}</td>}
-          {visibleColumns.module && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.module}</td>}
-          {visibleColumns.message && <td className="px-6 py-4 text-sm text-gray-300 font-mono break-all">{keywordsToHighlight.length > 0 ? highlightKeywords(log.message, keywordsToHighlight, onKeywordClick) : log.message}</td>}
-          {visibleColumns.functionName && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.functionName}</td>}
+          <td className={`px-4 py-4 whitespace-nowrap text-sm text-gray-400 font-mono ${COLUMN_WIDTHS.timestamp}`}>{formatTimestamp(log.timestamp, selectedTimezone)}</td>
+          {visibleColumns.level && <td className={`px-3 py-4 whitespace-nowrap ${COLUMN_WIDTHS.level}`}><span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${levelColorMap[log.level]}`}>{log.level}</span></td>}
+          {visibleColumns.daemon && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.daemon}`}><div className="truncate" title={log.daemon}>{log.daemon}</div></td>}
+          {visibleColumns.hostname && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.hostname}`}><div className="truncate" title={log.hostname}>{log.hostname}</div></td>}
+          {visibleColumns.pid && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.pid}`}>{log.pid}</td>}
+          {visibleColumns.module && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.module}`}><div className="truncate" title={log.module}>{log.module}</div></td>}
+          {visibleColumns.message && <td className={`px-6 py-4 text-sm text-gray-300 font-mono break-all ${COLUMN_WIDTHS.message}`}>{keywordsToHighlight.length > 0 ? highlightKeywords(log.message, keywordsToHighlight, onKeywordClick) : log.message}</td>}
+          {visibleColumns.functionName && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.functionName}`}><div className="truncate" title={log.functionName}>{log.functionName}</div></td>}
         </tr>
     ));
   }, [paginatedData, visibleColumns, highlightedRowId, selectedTimezone, keywordsToHighlight, onRowDoubleClick, onKeywordClick]);
@@ -622,9 +680,9 @@ export const LogTable: React.FC<LogTableProps> = ({
         <table className="min-w-full divide-y divide-gray-700">
           <thead className="bg-gray-800 sticky top-0 z-10">
             <tr>
-              <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Timestamp</th>
+              <th scope="col" className={`px-4 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider ${COLUMN_WIDTHS.timestamp}`}>Timestamp</th>
               {displayedColumns.map(col => (
-                  <th key={col} scope="col" className="px-3 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">{COLUMN_NAMES[col]}</th>
+                  <th key={col} scope="col" className={`px-3 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider ${COLUMN_WIDTHS[col]}`}>{COLUMN_NAMES[col]}</th>
               ))}
             </tr>
           </thead>
@@ -663,7 +721,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                   <input 
                       ref={searchInputRef}
                       type="text" 
-                      placeholder="Search (↑↓ for history)" 
+                      placeholder="Search (Ctrl+F)" 
                       className="bg-transparent border-none text-white text-sm focus:ring-0 w-32 sm:w-64 placeholder-gray-500"
                       value={searchQuery}
                       onChange={handleSearchChange}
@@ -702,7 +760,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                       onClick={handlePrevMatch}
                       disabled={currentMatchPos === 0 || matchingIndices.length === 0}
                       className={`p-1 rounded ${currentMatchPos === 0 || matchingIndices.length === 0 ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
-                      title="Find Previous (Shift+Enter)"
+                      title="Find Previous (Shift+Enter / Alt+Up)"
                   >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 15l7-7 7 7"></path></svg>
                   </button>
@@ -710,7 +768,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                       onClick={handleNextMatch}
                       disabled={currentMatchPos === matchingIndices.length - 1 || matchingIndices.length === 0}
                       className={`p-1 rounded ${currentMatchPos === matchingIndices.length - 1 || matchingIndices.length === 0 ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
-                      title="Find Next (Enter)"
+                      title="Find Next (Enter / Alt+Down)"
                   >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
                   </button>
@@ -719,7 +777,7 @@ export const LogTable: React.FC<LogTableProps> = ({
 
           {/* Right: Pagination */}
           <div className="flex items-center space-x-2 z-10 order-3">
-            <button onClick={handlePrevPage} disabled={currentPage === 1} className="p-1.5 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed">
+            <button onClick={handlePrevPage} disabled={currentPage === 1} className="p-1.5 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Previous Page (Left Arrow)">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
             </button>
             
@@ -738,7 +796,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                 <span>of {totalPages}</span>
             </div>
 
-            <button onClick={handleNextPage} disabled={currentPage === totalPages} className="p-1.5 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed">
+            <button onClick={handleNextPage} disabled={currentPage === totalPages} className="p-1.5 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Next Page (Right Arrow)">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
             </button>
           </div>

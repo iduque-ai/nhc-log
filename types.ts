@@ -1,3 +1,4 @@
+
 export enum LogLevel {
   DEBUG = 'DEBUG',
   INFO = 'INFO',
@@ -46,6 +47,12 @@ export interface LogTab {
   fixedFilters?: FilterState;
   currentPage?: number;
   scrollTop?: number;
+  // View State Persistence
+  logsPerPage: number;
+  searchQuery: string;
+  searchMatchCase: boolean;
+  searchMatchWholeWord: boolean;
+  searchUseRegex: boolean;
 }
 
 

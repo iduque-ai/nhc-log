@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import JSZip from 'jszip';
 import { ungzip } from 'pako';
@@ -106,6 +105,14 @@ const INITIAL_FILTER_STATE: FilterState = {
   keywordQueries: [],
   enableKeywordHighlight: false,
   deviceId: '',
+};
+
+const INITIAL_VIEW_STATE = {
+  logsPerPage: 500,
+  searchQuery: '',
+  searchMatchCase: false,
+  searchMatchWholeWord: false,
+  searchUseRegex: false,
 };
 
 const App: React.FC = () => {
@@ -217,6 +224,7 @@ const App: React.FC = () => {
       filters: { ...initialFiltersForTabs },
       currentPage: 1,
       scrollTop: 0,
+      ...INITIAL_VIEW_STATE,
     };
 
     const tab1Id = allLogsTabId + 1; // Ensure unique ID
@@ -237,6 +245,7 @@ const App: React.FC = () => {
         fixedFilters: clonedFilters,
         currentPage: 1,
         scrollTop: 0,
+        ...INITIAL_VIEW_STATE,
     };
     
     setTabs([allLogsTab, tab1]);
@@ -282,17 +291,17 @@ const App: React.FC = () => {
 
   const handleFilterChange = useCallback((filters: Partial<FilterState>) => {
     if (activeTabId === null) return;
-    setTabs(tabs.map(tab =>
+    setTabs(currentTabs => currentTabs.map(tab =>
       tab.id === activeTabId ? { ...tab, filters: { ...tab.filters, ...filters }, currentPage: 1, scrollTop: 0 } : tab
     ));
-  }, [tabs, activeTabId]);
+  }, [activeTabId]);
   
   const handlePageChange = useCallback((page: number) => {
     if (activeTabId === null) return;
-    setTabs(tabs.map(tab =>
+    setTabs(currentTabs => currentTabs.map(tab =>
       tab.id === activeTabId ? { ...tab, currentPage: page, scrollTop: 0 } : tab
     ));
-  }, [tabs, activeTabId]);
+  }, [activeTabId]);
 
   const handleScrollChange = useCallback((scrollTop: number) => {
     if (activeTabId === null) return;
@@ -300,6 +309,39 @@ const App: React.FC = () => {
         currentTabs.map(tab =>
             tab.id === activeTabId ? { ...tab, scrollTop } : tab
         )
+    );
+  }, [activeTabId]);
+
+  const handleTabViewStateChange = useCallback((changes: Partial<LogTab>) => {
+    if (activeTabId === null) return;
+    setTabs(currentTabs =>
+        currentTabs.map(tab =>
+            tab.id === activeTabId ? { ...tab, ...changes } : tab
+        )
+    );
+  }, [activeTabId]);
+
+  const handleLogsPerPageChange = useCallback((newLogsPerPage: number) => {
+    if (activeTabId === null) return;
+    setTabs(currentTabs =>
+      currentTabs.map(tab => {
+        if (tab.id === activeTabId) {
+            const currentLogsPerPage = tab.logsPerPage || 500;
+            const currentPage = tab.currentPage || 1;
+            // Calculate index of the first log on the current page (0-based)
+            const firstLogIndex = (currentPage - 1) * currentLogsPerPage;
+            // Calculate which page this log will be on with the new page size
+            const newPage = Math.floor(firstLogIndex / newLogsPerPage) + 1;
+            
+            return { 
+                ...tab, 
+                logsPerPage: newLogsPerPage, 
+                currentPage: newPage,
+                scrollTop: 0 // Reset scroll because exact pixel position will change
+            };
+        }
+        return tab;
+      })
     );
   }, [activeTabId]);
 
@@ -331,6 +373,7 @@ const App: React.FC = () => {
       fixedFilters: newFixedFilters,
       currentPage: 1,
       scrollTop: 0,
+      ...INITIAL_VIEW_STATE,
     };
     setTabs([...tabs, newTab]);
     setActiveTabId(newTabId);
@@ -541,7 +584,6 @@ const App: React.FC = () => {
             </div>
             <div className="flex-grow min-h-0">
               <LogViewer
-                key={activeTab.id}
                 logs={filteredLogs}
                 totalCount={baseLogs.length}
                 selectedTimezone={selectedTimezone}
@@ -556,6 +598,18 @@ const App: React.FC = () => {
                 onPageChange={handlePageChange}
                 scrollTop={activeTab.scrollTop}
                 onScrollChange={handleScrollChange}
+                // View State Persistence
+                tabId={activeTab.id}
+                logsPerPage={activeTab.logsPerPage || 500}
+                onLogsPerPageChange={handleLogsPerPageChange}
+                searchQuery={activeTab.searchQuery || ''}
+                onSearchQueryChange={(s) => handleTabViewStateChange({ searchQuery: s })}
+                searchMatchCase={activeTab.searchMatchCase || false}
+                onSearchMatchCaseChange={(b) => handleTabViewStateChange({ searchMatchCase: b })}
+                searchMatchWholeWord={activeTab.searchMatchWholeWord || false}
+                onSearchMatchWholeWordChange={(b) => handleTabViewStateChange({ searchMatchWholeWord: b })}
+                searchUseRegex={activeTab.searchUseRegex || false}
+                onSearchUseRegexChange={(b) => handleTabViewStateChange({ searchUseRegex: b })}
               />
             </div>
           </main>

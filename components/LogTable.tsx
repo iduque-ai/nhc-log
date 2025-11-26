@@ -18,6 +18,18 @@ interface LogTableProps {
   onPageChange: (page: number) => void;
   scrollTop?: number;
   onScrollChange?: (scrollTop: number) => void;
+  // View State Props
+  tabId: number;
+  logsPerPage: number;
+  onLogsPerPageChange: (n: number) => void;
+  searchQuery: string;
+  onSearchQueryChange: (s: string) => void;
+  searchMatchCase: boolean;
+  onSearchMatchCaseChange: (b: boolean) => void;
+  searchMatchWholeWord: boolean;
+  onSearchMatchWholeWordChange: (b: boolean) => void;
+  searchUseRegex: boolean;
+  onSearchUseRegexChange: (b: boolean) => void;
 }
 
 const levelColorMap: Record<LogLevel, string> = {
@@ -112,8 +124,18 @@ export const LogTable: React.FC<LogTableProps> = ({
   onPageChange,
   scrollTop = 0,
   onScrollChange,
+  tabId,
+  logsPerPage,
+  onLogsPerPageChange,
+  searchQuery,
+  onSearchQueryChange,
+  searchMatchCase,
+  onSearchMatchCaseChange,
+  searchMatchWholeWord,
+  onSearchMatchWholeWordChange,
+  searchUseRegex,
+  onSearchUseRegexChange
 }) => {
-  const [logsPerPage, setLogsPerPage] = useState(100);
   const [visibleColumns, setVisibleColumns] = useState<Record<string, boolean>>(() => {
     const initialCols = ALL_COLUMNS.reduce((acc, col) => ({ ...acc, [col]: !['hostname', 'pid', 'functionName'].includes(col) }), {} as Record<string, boolean>);
     if (totalDaemonCount <= 1) {
@@ -132,14 +154,8 @@ export const LogTable: React.FC<LogTableProps> = ({
 
   // Pagination input state
   const [pageInput, setPageInput] = useState(currentPage.toString());
-
-  // Search in tab state
-  const [localSearchTerm, setLocalSearchTerm] = useState('');
-  const [matchCase, setMatchCase] = useState(false);
-  const [matchWholeWord, setMatchWholeWord] = useState(false);
-  const [useRegex, setUseRegex] = useState(false);
   
-  // Search history state
+  // Search history state - persisted in localStorage
   const [searchHistory, setSearchHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const [tempSearchInput, setTempSearchInput] = useState<string>('');
@@ -147,24 +163,45 @@ export const LogTable: React.FC<LogTableProps> = ({
   const [currentMatchPos, setCurrentMatchPos] = useState(0); // Index in matchingIndices
   const [internalScrollId, setInternalScrollId] = useState<number | null>(null);
 
+  // Load search history from localStorage on mount
+  useEffect(() => {
+    try {
+        const savedHistory = localStorage.getItem('nhc_log_viewer_search_history');
+        if (savedHistory) {
+            setSearchHistory(JSON.parse(savedHistory));
+        }
+    } catch (e) {
+        console.error("Failed to load search history:", e);
+    }
+  }, []);
+
+  const saveSearchHistory = (newHistory: string[]) => {
+      setSearchHistory(newHistory);
+      try {
+          localStorage.setItem('nhc_log_viewer_search_history', JSON.stringify(newHistory));
+      } catch (e) {
+          console.error("Failed to save search history:", e);
+      }
+  };
+
   // Memoize matching indices to support "X of Y" and disable Prev/Next at boundaries
   const matchingIndices = useMemo(() => {
-    if (!localSearchTerm) return [];
+    if (!searchQuery) return [];
 
     let regex: RegExp;
     try {
-        let pattern = localSearchTerm;
+        let pattern = searchQuery;
         
-        if (!useRegex) {
+        if (!searchUseRegex) {
             // Escape special regex characters
             pattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         }
 
-        if (matchWholeWord) {
+        if (searchMatchWholeWord) {
             pattern = `\\b${pattern}\\b`;
         }
         
-        const flags = matchCase ? '' : 'i';
+        const flags = searchMatchCase ? '' : 'i';
         regex = new RegExp(pattern, flags);
     } catch (e) {
         return [];
@@ -179,7 +216,7 @@ export const LogTable: React.FC<LogTableProps> = ({
         }
         return acc;
     }, [] as number[]);
-  }, [data, localSearchTerm, matchCase, matchWholeWord, useRegex]);
+  }, [data, searchQuery, searchMatchCase, searchMatchWholeWord, searchUseRegex]);
 
   // When search matches update (due to new term or data change), 
   // try to maintain relative position or find match nearest to current view.
@@ -198,7 +235,7 @@ export const LogTable: React.FC<LogTableProps> = ({
         setCurrentMatchPos(0);
         // Do not reset internalScrollId to null here immediately to avoid jumping unexpectedly
     }
-  }, [matchingIndices]); // Intentionally not including currentPage to avoid re-jumping when user manually pages
+  }, [matchingIndices, tabId]); // Added tabId dependence to reset matches when switching tabs
 
   const keywordsToHighlight = useMemo(() => {
     const keys = new Set<string>();
@@ -243,7 +280,7 @@ export const LogTable: React.FC<LogTableProps> = ({
         if (rowElement) {
             rowElement.scrollIntoView({ behavior: 'auto', block: 'center' });
             setHighlightedRowId(targetScrollId);
-            // Timeout removed to keep results highlighted persistently
+            // Persistent highlight: Timeout removed
             
             // Allow layout to update before capturing scrollTop and clearing the target
             // This ensures the new scroll position is saved to state before targetScrollId becomes null
@@ -311,7 +348,9 @@ export const LogTable: React.FC<LogTableProps> = ({
 
     return () => clearTimeout(timerId);
 
-  }, [paginatedData, targetScrollId, currentPage, scrollTop]);
+    // CRITICAL FIX: Removed 'scrollTop' from dependencies to prevent loop when user scrolls.
+    // Added 'tabId' to ensure we restore position when switching back to this tab.
+  }, [paginatedData, targetScrollId, currentPage, tabId]);
 
 
   const handleNextPage = () => onPageChange(Math.min(currentPage + 1, totalPages));
@@ -387,7 +426,7 @@ export const LogTable: React.FC<LogTableProps> = ({
   };
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setLocalSearchTerm(e.target.value);
+    onSearchQueryChange(e.target.value);
     // Reset history index if user types manually
     if (historyIndex !== -1) {
         setHistoryIndex(-1);
@@ -406,14 +445,12 @@ export const LogTable: React.FC<LogTableProps> = ({
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (e.key === 'Enter') {
           // Add to history
-          if (localSearchTerm.trim()) {
-            setSearchHistory(prev => {
-                const term = localSearchTerm.trim();
-                const newHistory = prev.filter(item => item !== term); // Remove duplicate if exists
-                newHistory.push(term); // Add to end
-                if (newHistory.length > 20) newHistory.shift(); // Keep last 20
-                return newHistory;
-            });
+          if (searchQuery.trim()) {
+            const term = searchQuery.trim();
+            const newHistory = searchHistory.filter(item => item !== term); // Remove duplicate if exists
+            newHistory.push(term); // Add to end
+            if (newHistory.length > 20) newHistory.shift(); // Keep last 20
+            saveSearchHistory(newHistory);
             setHistoryIndex(-1);
           }
 
@@ -428,14 +465,14 @@ export const LogTable: React.FC<LogTableProps> = ({
 
           if (historyIndex === -1) {
               // Start browsing history, save current input
-              setTempSearchInput(localSearchTerm);
+              setTempSearchInput(searchQuery);
               const newIndex = searchHistory.length - 1;
               setHistoryIndex(newIndex);
-              setLocalSearchTerm(searchHistory[newIndex]);
+              onSearchQueryChange(searchHistory[newIndex]);
           } else {
               const newIndex = Math.max(0, historyIndex - 1);
               setHistoryIndex(newIndex);
-              setLocalSearchTerm(searchHistory[newIndex]);
+              onSearchQueryChange(searchHistory[newIndex]);
           }
           moveCursorToEnd();
       } else if (e.key === 'ArrowDown') {
@@ -446,10 +483,10 @@ export const LogTable: React.FC<LogTableProps> = ({
           if (newIndex >= searchHistory.length) {
               // Back to current input
               setHistoryIndex(-1);
-              setLocalSearchTerm(tempSearchInput);
+              onSearchQueryChange(tempSearchInput);
           } else {
               setHistoryIndex(newIndex);
-              setLocalSearchTerm(searchHistory[newIndex]);
+              onSearchQueryChange(searchHistory[newIndex]);
           }
           moveCursorToEnd();
       } else if (e.key === 'PageUp') {
@@ -519,6 +556,44 @@ export const LogTable: React.FC<LogTableProps> = ({
     });
   };
 
+  // Memoize the table rows to avoid unnecessary re-renders when only scrollTop changes in props.
+  const tableRows = useMemo(() => {
+    if (paginatedData.length === 0) {
+        return (
+            <tr>
+                <td colSpan={displayedColumns.length + 2} className="text-center py-10 text-gray-400">
+                    No logs match the current filters.
+                </td>
+            </tr>
+        );
+    }
+    return paginatedData.map((log) => (
+        <tr 
+          key={log.id} 
+          ref={el => {
+            if (el) rowRefs.current.set(log.id, el);
+            else rowRefs.current.delete(log.id);
+          }}
+          onDoubleClick={onRowDoubleClick ? () => onRowDoubleClick(log) : undefined}
+          className={`
+            hover:bg-gray-700/50 
+            ${onRowDoubleClick ? 'cursor-pointer' : ''}
+            ${highlightedRowId === log.id ? 'bg-blue-800/60' : ''}
+            transition-colors duration-500
+          `}
+        >
+          <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-400 font-mono">{formatTimestamp(log.timestamp, selectedTimezone)}</td>
+          {visibleColumns.level && <td className="px-3 py-4 whitespace-nowrap"><span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${levelColorMap[log.level]}`}>{log.level}</span></td>}
+          {visibleColumns.daemon && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.daemon}</td>}
+          {visibleColumns.hostname && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.hostname}</td>}
+          {visibleColumns.pid && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.pid}</td>}
+          {visibleColumns.module && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.module}</td>}
+          {visibleColumns.message && <td className="px-6 py-4 text-sm text-gray-300 font-mono break-all">{keywordsToHighlight.length > 0 ? highlightKeywords(log.message, keywordsToHighlight, onKeywordClick) : log.message}</td>}
+          {visibleColumns.functionName && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.functionName}</td>}
+        </tr>
+    ));
+  }, [paginatedData, visibleColumns, highlightedRowId, selectedTimezone, keywordsToHighlight, onRowDoubleClick, onKeywordClick]);
+
   return (
     <div className="p-4 flex flex-col h-full">
       <div className="flex justify-between items-center mb-4">
@@ -554,39 +629,7 @@ export const LogTable: React.FC<LogTableProps> = ({
             </tr>
           </thead>
           <tbody className="bg-gray-800 divide-y divide-gray-700">
-            {paginatedData.length === 0 ? (
-              <tr>
-                <td colSpan={displayedColumns.length + 2} className="text-center py-10 text-gray-400">
-                  No logs match the current filters.
-                </td>
-              </tr>
-            ) : (
-              paginatedData.map((log) => (
-                <tr 
-                  key={log.id} 
-                  ref={el => {
-                    if (el) rowRefs.current.set(log.id, el);
-                    else rowRefs.current.delete(log.id);
-                  }}
-                  onDoubleClick={onRowDoubleClick ? () => onRowDoubleClick(log) : undefined}
-                  className={`
-                    hover:bg-gray-700/50 
-                    ${onRowDoubleClick ? 'cursor-pointer' : ''}
-                    ${highlightedRowId === log.id ? 'bg-blue-800/60' : ''}
-                    transition-colors duration-500
-                  `}
-                >
-                  <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-400 font-mono">{formatTimestamp(log.timestamp, selectedTimezone)}</td>
-                  {visibleColumns.level && <td className="px-3 py-4 whitespace-nowrap"><span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${levelColorMap[log.level]}`}>{log.level}</span></td>}
-                  {visibleColumns.daemon && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.daemon}</td>}
-                  {visibleColumns.hostname && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.hostname}</td>}
-                  {visibleColumns.pid && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.pid}</td>}
-                  {visibleColumns.module && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.module}</td>}
-                  {visibleColumns.message && <td className="px-6 py-4 text-sm text-gray-300 font-mono break-all">{keywordsToHighlight.length > 0 ? highlightKeywords(log.message, keywordsToHighlight, onKeywordClick) : log.message}</td>}
-                  {visibleColumns.functionName && <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-300">{log.functionName}</td>}
-                </tr>
-              ))
-            )}
+            {tableRows}
           </tbody>
         </table>
       </div>
@@ -601,12 +644,11 @@ export const LogTable: React.FC<LogTableProps> = ({
                   id="logs-per-page"
                   value={logsPerPage}
                   onChange={(e) => {
-                    setLogsPerPage(Number(e.target.value));
-                    onPageChange(1);
+                    onLogsPerPageChange(Number(e.target.value));
                   }}
                   className="bg-gray-700 text-white rounded-md py-1 px-2 text-sm border border-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
-                  {[50, 100, 150, 200, 300, 500].map(size => (
+                  {[50, 100, 500, 1000, 5000].map(size => (
                       <option key={size} value={size}>{size}</option>
                   ))}
               </select>
@@ -623,7 +665,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                       type="text" 
                       placeholder="Search (↑↓ for history)" 
                       className="bg-transparent border-none text-white text-sm focus:ring-0 w-32 sm:w-64 placeholder-gray-500"
-                      value={localSearchTerm}
+                      value={searchQuery}
                       onChange={handleSearchChange}
                       onKeyDown={handleSearchKeyDown}
                   />
@@ -631,22 +673,22 @@ export const LogTable: React.FC<LogTableProps> = ({
                   {/* Search Options */}
                   <div className="flex items-center space-x-0.5 border-r border-gray-700 pr-1 mr-1">
                       <button
-                          onClick={() => setMatchCase(!matchCase)}
-                          className={`p-1 rounded text-xs font-medium w-6 h-6 flex items-center justify-center transition-colors ${matchCase ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
+                          onClick={() => onSearchMatchCaseChange(!searchMatchCase)}
+                          className={`p-1 rounded text-xs font-medium w-6 h-6 flex items-center justify-center transition-colors ${searchMatchCase ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
                           title="Match Case"
                       >
                           Aa
                       </button>
                       <button
-                          onClick={() => setMatchWholeWord(!matchWholeWord)}
-                          className={`p-1 rounded text-xs font-medium w-6 h-6 flex items-center justify-center transition-colors ${matchWholeWord ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
+                          onClick={() => onSearchMatchWholeWordChange(!searchMatchWholeWord)}
+                          className={`p-1 rounded text-xs font-medium w-6 h-6 flex items-center justify-center transition-colors ${searchMatchWholeWord ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
                           title="Match Whole Word"
                       >
                           <span className="underline decoration-1 underline-offset-2">ab</span>
                       </button>
                       <button
-                          onClick={() => setUseRegex(!useRegex)}
-                          className={`p-1 rounded text-xs font-medium w-6 h-6 flex items-center justify-center transition-colors ${useRegex ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
+                          onClick={() => onSearchUseRegexChange(!searchUseRegex)}
+                          className={`p-1 rounded text-xs font-medium w-6 h-6 flex items-center justify-center transition-colors ${searchUseRegex ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
                           title="Use Regular Expression"
                       >
                           .*
@@ -654,7 +696,7 @@ export const LogTable: React.FC<LogTableProps> = ({
                   </div>
 
                   <span className="text-xs text-gray-500 px-1 min-w-[3rem] text-center select-none tabular-nums">
-                      {matchingIndices.length > 0 ? `${currentMatchPos + 1}/${matchingIndices.length}` : (localSearchTerm ? '0/0' : '')}
+                      {matchingIndices.length > 0 ? `${currentMatchPos + 1}/${matchingIndices.length}` : (searchQuery ? '0/0' : '')}
                   </span>
                   <button 
                       onClick={handlePrevMatch}

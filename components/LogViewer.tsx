@@ -18,6 +18,18 @@ interface LogViewerProps {
     onPageChange: (page: number) => void;
     scrollTop?: number;
     onScrollChange?: (scrollTop: number) => void;
+    // View State Props
+    tabId: number;
+    logsPerPage: number;
+    onLogsPerPageChange: (n: number) => void;
+    searchQuery: string;
+    onSearchQueryChange: (s: string) => void;
+    searchMatchCase: boolean;
+    onSearchMatchCaseChange: (b: boolean) => void;
+    searchMatchWholeWord: boolean;
+    onSearchMatchWholeWordChange: (b: boolean) => void;
+    searchUseRegex: boolean;
+    onSearchUseRegexChange: (b: boolean) => void;
 }
 
 export const LogViewer: React.FC<LogViewerProps> = ({ 
@@ -34,7 +46,18 @@ export const LogViewer: React.FC<LogViewerProps> = ({
     currentPage,
     onPageChange,
     scrollTop,
-    onScrollChange
+    onScrollChange,
+    tabId,
+    logsPerPage,
+    onLogsPerPageChange,
+    searchQuery,
+    onSearchQueryChange,
+    searchMatchCase,
+    onSearchMatchCaseChange,
+    searchMatchWholeWord,
+    onSearchMatchWholeWordChange,
+    searchUseRegex,
+    onSearchUseRegexChange
 }) => {
     const [activeView, setActiveView] = useState<'data' | 'summary'>('data');
 
@@ -81,6 +104,17 @@ export const LogViewer: React.FC<LogViewerProps> = ({
                         onPageChange={onPageChange}
                         scrollTop={scrollTop}
                         onScrollChange={onScrollChange}
+                        tabId={tabId}
+                        logsPerPage={logsPerPage}
+                        onLogsPerPageChange={onLogsPerPageChange}
+                        searchQuery={searchQuery}
+                        onSearchQueryChange={onSearchQueryChange}
+                        searchMatchCase={searchMatchCase}
+                        onSearchMatchCaseChange={onSearchMatchCaseChange}
+                        searchMatchWholeWord={searchMatchWholeWord}
+                        onSearchMatchWholeWordChange={onSearchMatchWholeWordChange}
+                        searchUseRegex={searchUseRegex}
+                        onSearchUseRegexChange={onSearchUseRegexChange}
                       />
                }
             </div>

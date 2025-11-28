@@ -660,11 +660,18 @@ export const LogTable: React.FC<LogTableProps> = ({
             if (el) rowRefs.current.set(log.id, el);
             else rowRefs.current.delete(log.id);
           }}
+          onClick={() => {
+              if (highlightedRowId === log.id) {
+                  setHighlightedRowId(null);
+              }
+          }}
           onDoubleClick={onRowDoubleClick ? () => onRowDoubleClick(log) : undefined}
           className={`
-            hover:bg-gray-700/50 
             ${onRowDoubleClick ? 'cursor-pointer' : ''}
-            ${highlightedRowId === log.id ? 'bg-blue-800/60' : ''}
+            ${highlightedRowId === log.id 
+                ? 'bg-blue-800/60 hover:bg-blue-800/50' 
+                : 'hover:bg-gray-700/50'
+            }
             transition-colors duration-200
           `}
         >
@@ -695,11 +702,19 @@ export const LogTable: React.FC<LogTableProps> = ({
             if (el) rowRefs.current.set(log.id, el);
             else rowRefs.current.delete(log.id);
           }}
+          onClick={() => {
+              if (highlightedRowId === log.id) {
+                  setHighlightedRowId(null);
+              }
+          }}
           onDoubleClick={onRowDoubleClick ? () => onRowDoubleClick(log) : undefined}
           className={`
             bg-gray-800 rounded-md p-3 mb-2 border-l-4 ${levelBorderMap[log.level]}
-            shadow-sm hover:bg-gray-750 transition-colors
-            ${highlightedRowId === log.id ? 'ring-2 ring-blue-500 bg-gray-700' : ''}
+            shadow-sm transition-colors
+            ${highlightedRowId === log.id 
+                ? 'ring-2 ring-blue-500 bg-gray-700' 
+                : 'hover:bg-gray-700'
+            }
           `}
        >
           <div className="flex justify-between items-start mb-2">
@@ -802,26 +817,9 @@ export const LogTable: React.FC<LogTableProps> = ({
       </div>
 
       {data.length > 0 && (
-        <div className="relative flex flex-col sm:flex-row justify-between items-center mt-2 gap-2 sm:gap-0">
+        <div className="relative flex flex-col sm:flex-row justify-between items-center mt-2 gap-2 sm:gap-0 pb-1 sm:pb-0" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
           
-          {/* Left: Rows Per Page */}
-          <div className="flex items-center space-x-1 z-10 order-2 sm:order-1">
-              <label htmlFor="logs-per-page" className="text-xs text-gray-400">Rows:</label>
-              <select
-                  id="logs-per-page"
-                  value={logsPerPage}
-                  onChange={(e) => {
-                    onLogsPerPageChange(Number(e.target.value));
-                  }}
-                  className="bg-gray-700 text-white rounded-md py-0.5 px-1.5 text-xs border border-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
-              >
-                  {[50, 100, 500, 1000, 5000].map(size => (
-                      <option key={size} value={size}>{size}</option>
-                  ))}
-              </select>
-          </div>
-
-          {/* Center: Find in Tab */}
+          {/* Search (Mobile: Top, Desktop: Center Absolute) */}
           <div className="z-0 w-full sm:w-auto flex justify-center order-1 sm:order-2 sm:absolute sm:left-1/2 sm:top-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2">
               <div className="flex items-center bg-gray-800 rounded-md border border-gray-600 p-0.5 shadow-sm w-full sm:w-auto">
                   <div className="pl-1 pr-0.5 text-gray-400 flex-shrink-0">
@@ -886,30 +884,50 @@ export const LogTable: React.FC<LogTableProps> = ({
               </div>
           </div>
 
-          {/* Right: Pagination */}
-          <div className="flex items-center space-x-1 z-10 order-3">
-            <button onClick={handlePrevPage} disabled={currentPage === 1} className="p-1 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Previous Page (Left Arrow)">
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
-            </button>
-            
-            <div className="flex items-center space-x-1 text-xs text-gray-400">
-                <span>Page</span>
-                <input 
-                    type="number"
-                    min="1"
-                    max={totalPages}
-                    value={pageInput}
-                    onChange={(e) => setPageInput(e.target.value)}
-                    onBlur={handlePageInputSubmit}
-                    onKeyDown={handlePageInputKeyDown}
-                    className="w-10 text-center bg-gray-700 border border-gray-600 rounded text-white py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-500 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-inner-spin-button]:m-0 [appearance:textfield]"
-                />
-                <span>of {totalPages}</span>
-            </div>
+          {/* Wrapper for Bottom Controls (Rows + Pagination) to be on the same row on mobile, separated on desktop */}
+          <div className="flex w-full sm:w-auto justify-between items-center sm:contents order-2 sm:order-1">
+              {/* Rows Per Page */}
+              <div className="flex items-center space-x-1 z-10 sm:order-1">
+                  <label htmlFor="logs-per-page" className="text-xs text-gray-400">Rows:</label>
+                  <select
+                      id="logs-per-page"
+                      value={logsPerPage}
+                      onChange={(e) => {
+                        onLogsPerPageChange(Number(e.target.value));
+                      }}
+                      className="bg-gray-700 text-white rounded-md py-0.5 px-1.5 text-xs border border-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  >
+                      {[50, 100, 500, 1000, 5000].map(size => (
+                          <option key={size} value={size}>{size}</option>
+                      ))}
+                  </select>
+              </div>
 
-            <button onClick={handleNextPage} disabled={currentPage === totalPages} className="p-1 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Next Page (Right Arrow)">
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
-            </button>
+              {/* Pagination */}
+              <div className="flex items-center space-x-1 z-10 sm:order-3">
+                <button onClick={handlePrevPage} disabled={currentPage === 1} className="p-1 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Previous Page (Left Arrow)">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
+                </button>
+                
+                <div className="flex items-center space-x-1 text-xs text-gray-400">
+                    <span>Page</span>
+                    <input 
+                        type="number"
+                        min="1"
+                        max={totalPages}
+                        value={pageInput}
+                        onChange={(e) => setPageInput(e.target.value)}
+                        onBlur={handlePageInputSubmit}
+                        onKeyDown={handlePageInputKeyDown}
+                        className="w-10 text-center bg-gray-700 border border-gray-600 rounded text-white py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-500 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-inner-spin-button]:m-0 [appearance:textfield]"
+                    />
+                    <span>of {totalPages}</span>
+                </div>
+
+                <button onClick={handleNextPage} disabled={currentPage === totalPages} className="p-1 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Next Page (Right Arrow)">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
+                </button>
+              </div>
           </div>
         </div>
       )}

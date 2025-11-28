@@ -795,7 +795,7 @@ const App: React.FC = () => {
   }, [allDaemons, allModules, allFunctionNames]);
 
   return (
-    <div className="flex h-screen bg-gray-800 text-white font-sans overflow-hidden relative">
+    <div className="flex h-[100dvh] bg-gray-800 text-white font-sans overflow-hidden relative">
       {fileInfos.length > 0 && activeTab ? (
         <>
           {/* Mobile Backdrop */}

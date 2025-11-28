@@ -10,18 +10,18 @@
   },
   "dependencies": {
     "@google/genai": "latest",
-    "@vercel/analytics": "^1.4.1",
-    "jszip": "^3.10.1",
-    "pako": "^2.1.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "@vercel/analytics": "latest",
+    "jszip": "latest",
+    "pako": "latest",
+    "react": "latest",
+    "react-dom": "latest"
   },
   "devDependencies": {
-    "@types/pako": "^2.0.3",
-    "@types/react": "^18.2.66",
-    "@types/react-dom": "^18.2.22",
-    "@vitejs/plugin-react": "^4.2.1",
-    "typescript": "^5.2.2",
-    "vite": "^5.2.0"
+    "@types/pako": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   }
 }

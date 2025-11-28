@@ -29,18 +29,46 @@ const determineLevelFromMessage = (message: string): LogLevel => {
     return LogLevel.UNKNOWN;
 };
 
+const MONTH_MAP: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+};
+
 const parseTimestamp = (timestampStr: string): Date | null => {
     // Handle timestamps without a year by assuming the current year.
-    // Per user request, log times are in UTC, so append 'UTC' to parse correctly.
-    // Check if it's a syslog style (Sep 11 ...) or ISO style (2024-...)
+    // Per user request, log times are in UTC.
     
-    let parsedTimestamp;
+    // Check if it's a syslog style (Sep 11 HH:mm:ss or Sep  1 HH:mm:ss)
+    // WebKit (Safari/iOS) is strict and rejects "Sep 11 12:00:00 2024 UTC" or manual strings depending on locale.
+    // We manually parse the components and construct via Date.UTC to be safe across all browsers/locales.
+    const syslogMatch = timestampStr.match(/^([A-Za-z]{3})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/);
     
-    if (/^\w{3}\s+\d/.test(timestampStr)) {
-         const parsed = new Date(`${timestampStr} ${new Date().getFullYear()} UTC`);
-         if (!isNaN(parsed.getTime())) return parsed;
+    if (syslogMatch) {
+         const [, monthStr, dayStr, timeStr] = syslogMatch;
+         const monthIndex = MONTH_MAP[monthStr.toLowerCase()];
+         
+         if (monthIndex !== undefined) {
+             const year = new Date().getFullYear();
+             const day = parseInt(dayStr, 10);
+             
+             // Parse time components
+             const [hoursStr, minutesStr, secondsFullStr] = timeStr.split(':');
+             const hours = parseInt(hoursStr, 10);
+             const minutes = parseInt(minutesStr, 10);
+             
+             // Handle seconds and optional milliseconds (e.g., "00" or "00.123")
+             const [secondsStr, msStr] = secondsFullStr.split('.');
+             const seconds = parseInt(secondsStr, 10);
+             const milliseconds = msStr ? parseInt(msStr.padEnd(3, '0').substring(0, 3), 10) : 0;
+
+             // Construct UTC date manually to avoid browser parsing inconsistencies
+             const parsed = new Date(Date.UTC(year, monthIndex, day, hours, minutes, seconds, milliseconds));
+             if (!isNaN(parsed.getTime())) return parsed;
+         }
     }
 
+    let parsedTimestamp;
+    
     if (/^\d+$/.test(timestampStr)) {
         // Numeric timestamp is likely epoch milliseconds, which is already UTC.
         parsedTimestamp = new Date(parseInt(timestampStr, 10));
@@ -48,11 +76,19 @@ const parseTimestamp = (timestampStr: string): Date | null => {
         // For string timestamps, attempt to parse as UTC if no timezone is specified.
         if (!/Z|[+-]\d{2}(:?\d{2})?$/.test(timestampStr)) {
             // For ISO-like strings (containing 'T'), appending 'Z' is the standard for UTC.
-            // For other formats, appending ' UTC' often works.
-            const utcTimestampString = timestampStr.includes('T')
-                ? `${timestampStr}Z`
-                : `${timestampStr} UTC`;
-            parsedTimestamp = new Date(utcTimestampString);
+            
+            // If it looks like YYYY-MM-DD... attempt to make it strict ISO 8601 for WebKit
+            if (/^\d{4}-\d{2}-\d{2}/.test(timestampStr)) {
+                 // Replace space with T if needed and ensure Z suffix
+                 const isoStr = timestampStr.replace(' ', 'T').replace(/Z| UTC$/, '') + 'Z';
+                 parsedTimestamp = new Date(isoStr);
+            } else {
+                 // Fallback for other formats
+                 const utcTimestampString = timestampStr.includes('T')
+                    ? `${timestampStr}Z`
+                    : `${timestampStr} UTC`;
+                 parsedTimestamp = new Date(utcTimestampString);
+            }
 
             // If parsing as UTC fails, fall back to default browser parsing
             if (isNaN(parsedTimestamp.getTime())) {
@@ -950,10 +986,8 @@ const App: React.FC = () => {
                 </div>
             </div>
 
-            <div className="mt-8 flex items-center space-x-4 text-[10px] text-gray-600">
+            <div className="mt-8 flex items-center justify-center text-[10px] text-gray-600">
                 <span>Supports .log, .txt, .zip, .gz</span>
-                <span>•</span>
-                <span>Privacy focused: Processing happens locally</span>
             </div>
           </div>
         </main>

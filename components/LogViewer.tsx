@@ -39,7 +39,7 @@ export const LogViewer: React.FC<LogViewerProps> = ({
     totalDaemonCount, 
     keywordQueries, 
     enableKeywordHighlight, 
-    onRowDoubleClick,
+    onRowDoubleClick, 
     onKeywordClick,
     scrollToLogId,
     onScrollComplete,
@@ -86,7 +86,12 @@ export const LogViewer: React.FC<LogViewerProps> = ({
                     </button>
                 </nav>
             </div>
-            <div className="flex-grow overflow-auto">
+            {/* 
+                FIX: Changed overflow-auto to conditional based on view. 
+                LogTable handles its own scrolling internally to support sticky headers/footers and correct scrollIntoView behavior.
+                SummaryDashboard needs the container to scroll.
+            */}
+            <div className={`flex-grow ${activeView === 'summary' ? 'overflow-auto' : 'overflow-hidden'}`}>
                {activeView === 'summary' 
                     ? <SummaryDashboard data={logs} />
                     : <LogTable 

@@ -182,7 +182,6 @@ export const LogTable: React.FC<LogTableProps> = ({
   }, [totalDaemonCount]);
 
   const [highlightedRowId, setHighlightedRowId] = useState<number | null>(null);
-  const rowRefs = useRef(new Map<number, HTMLElement>());
   const tableContainerRef = useRef<HTMLDivElement>(null);
   const scrollRequestRef = useRef<number | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -201,6 +200,8 @@ export const LogTable: React.FC<LogTableProps> = ({
 
   const [currentMatchPos, setCurrentMatchPos] = useState(0); // Index in matchingIndices
   const [internalScrollId, setInternalScrollId] = useState<number | null>(null);
+  const searchCommitted = useRef(false);
+  const isNavigatingToMatch = useRef(false); // Used to prevent auto-reset of match position on page load during navigation
 
   // Load search history from localStorage on mount
   useEffect(() => {
@@ -257,9 +258,40 @@ export const LogTable: React.FC<LogTableProps> = ({
     }, [] as number[]);
   }, [data, searchQuery, searchMatchCase, searchMatchWholeWord, searchUseRegex]);
 
+  const jumpToMatch = (index: number) => {
+      if (index >= 0 && index < matchingIndices.length) {
+          isNavigatingToMatch.current = true;
+          searchCommitted.current = true;
+          setCurrentMatchPos(index);
+          setInternalScrollId(data[matchingIndices[index]].id);
+      }
+  };
+
+  const handleNextMatch = () => {
+      if (matchingIndices.length === 0) return;
+      const nextPos = currentMatchPos + 1;
+      if (nextPos < matchingIndices.length) {
+          jumpToMatch(nextPos);
+      }
+  };
+
+  const handlePrevMatch = () => {
+      if (matchingIndices.length === 0) return;
+      const prevPos = currentMatchPos - 1;
+      if (prevPos >= 0) {
+          jumpToMatch(prevPos);
+      }
+  };
+
   // When search matches update (due to new term or data change), 
   // try to maintain relative position or find match nearest to current view.
   useEffect(() => {
+    if (isNavigatingToMatch.current) {
+        isNavigatingToMatch.current = false;
+        return;
+    }
+
+    searchCommitted.current = false;
     if (matchingIndices.length > 0) {
         // Find the first match that is on or after the current page start
         const startIndex = (currentPage - 1) * logsPerPage;
@@ -269,12 +301,10 @@ export const LogTable: React.FC<LogTableProps> = ({
         if (newPos === -1) newPos = 0;
         
         setCurrentMatchPos(newPos);
-        setInternalScrollId(data[matchingIndices[newPos]].id);
     } else {
         setCurrentMatchPos(0);
-        // Do not reset internalScrollId to null here immediately to avoid jumping unexpectedly
     }
-  }, [matchingIndices, tabId]); // Added tabId dependence to reset matches when switching tabs
+  }, [matchingIndices, tabId, currentPage, logsPerPage]);
 
   const keywordsToHighlight = useMemo(() => {
     const keys = new Set<string>();
@@ -309,20 +339,23 @@ export const LogTable: React.FC<LogTableProps> = ({
   const targetScrollId = scrollToLogId ?? internalScrollId;
 
   // Use useEffect to handle scrolling after render and layout paint.
-  // We use a timeout to ensure the browser has settled after a tab switch.
   useEffect(() => {
     if (targetScrollId === null) return;
 
     const attemptScroll = () => {
-        const rowElement = rowRefs.current.get(targetScrollId);
+        // Since we have duplicate rows (one for desktop, one for mobile), we need to find the one that is visible.
+        const desktopRow = document.getElementById(`log-row-desktop-${targetScrollId}`);
+        const mobileRow = document.getElementById(`log-row-mobile-${targetScrollId}`);
+        
+        // Check visibility by offsetParent (it is null if display: none)
+        const rowElement = (desktopRow && desktopRow.offsetParent) ? desktopRow : 
+                           (mobileRow && mobileRow.offsetParent) ? mobileRow : null;
         
         if (rowElement) {
             rowElement.scrollIntoView({ behavior: 'auto', block: 'center' });
             setHighlightedRowId(targetScrollId);
-            // Persistent highlight: Timeout removed
             
             // Allow layout to update before capturing scrollTop and clearing the target
-            // This ensures the new scroll position is saved to state before targetScrollId becomes null
             setTimeout(() => {
                 if (tableContainerRef.current && onScrollChange) {
                     onScrollChange(tableContainerRef.current.scrollTop);
@@ -336,25 +369,29 @@ export const LogTable: React.FC<LogTableProps> = ({
                 if (targetScrollId === internalScrollId) {
                     setInternalScrollId(null);
                 }
-            }, 100);
-        } 
-        
-        // If row is not on current page, switch page
-        const logIndex = data.findIndex(log => log.id === targetScrollId);
-        if (logIndex !== -1) {
-            const targetPage = Math.floor(logIndex / logsPerPage) + 1;
-            if (targetPage !== currentPage) {
-                onPageChange(targetPage);
-            }
+            }, 50);
         } else {
-            // ID not found (e.g. filtered out), just clear the request
-            if (targetScrollId === scrollToLogId && onScrollComplete) onScrollComplete();
-            if (targetScrollId === internalScrollId) setInternalScrollId(null);
+            // If row is not found in DOM, check if we need to switch page first
+            const logIndex = data.findIndex(log => log.id === targetScrollId);
+            if (logIndex !== -1) {
+                const targetPage = Math.floor(logIndex / logsPerPage) + 1;
+                if (targetPage !== currentPage) {
+                    onPageChange(targetPage);
+                    // IMPORTANT: Return here to wait for the next render with correct page
+                    return;
+                }
+            } else {
+                // ID not found in data (e.g. filtered out), just clear the request
+                if (targetScrollId === scrollToLogId && onScrollComplete) onScrollComplete();
+                if (targetScrollId === internalScrollId) setInternalScrollId(null);
+            }
         }
     };
 
-    const timeoutId = setTimeout(attemptScroll, 100);
-    return () => clearTimeout(timeoutId);
+    // Use requestAnimationFrame to ensure we try after paint, fallback to setTimeout
+    requestAnimationFrame(() => {
+        setTimeout(attemptScroll, 0);
+    });
 
   }, [targetScrollId, currentPage, data, onScrollComplete, logsPerPage, onPageChange, onScrollChange, scrollToLogId, internalScrollId]);
 
@@ -415,15 +452,39 @@ export const LogTable: React.FC<LogTableProps> = ({
         }
 
         // Global Esc: Blur + Clear logic
-        // If search is NOT focused, and we press Esc, clear the search query (Esc x2 behavior part 2).
         if (e.key === 'Escape' && !isSearchFocused && searchQuery) {
             e.preventDefault();
             onSearchQueryChange('');
             return;
         }
 
+        // Find Next/Prev on Global Enter
+        if (e.key === 'Enter' && !isInput && matchingIndices.length > 0) {
+             e.preventDefault();
+             if (e.shiftKey) {
+                 handlePrevMatch();
+             } else {
+                 handleNextMatch();
+             }
+             return;
+        }
+
         if (isInput) {
             return;
+        }
+
+        // Search Navigation via Up/Down arrows
+        if (matchingIndices.length > 0 && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+             if (e.key === 'ArrowUp') {
+                 e.preventDefault();
+                 handlePrevMatch();
+                 return;
+             }
+             if (e.key === 'ArrowDown') {
+                 e.preventDefault();
+                 handleNextMatch();
+                 return;
+             }
         }
 
         // Page Navigation
@@ -452,7 +513,7 @@ export const LogTable: React.FC<LogTableProps> = ({
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [currentPage, totalPages, onPageChange, searchQuery, onSearchQueryChange]);
+  }, [currentPage, totalPages, onPageChange, searchQuery, onSearchQueryChange, matchingIndices, currentMatchPos]);
 
   const handlePageInputSubmit = () => {
     let p = parseInt(pageInput, 10);
@@ -476,24 +537,6 @@ export const LogTable: React.FC<LogTableProps> = ({
         e.preventDefault();
         onPageChange(totalPages);
     }
-  };
-
-  const handleNextMatch = () => {
-      if (matchingIndices.length === 0) return;
-      const nextPos = currentMatchPos + 1;
-      if (nextPos < matchingIndices.length) {
-          setCurrentMatchPos(nextPos);
-          setInternalScrollId(data[matchingIndices[nextPos]].id);
-      }
-  };
-
-  const handlePrevMatch = () => {
-      if (matchingIndices.length === 0) return;
-      const prevPos = currentMatchPos - 1;
-      if (prevPos >= 0) {
-          setCurrentMatchPos(prevPos);
-          setInternalScrollId(data[matchingIndices[prevPos]].id);
-      }
   };
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -533,6 +576,9 @@ export const LogTable: React.FC<LogTableProps> = ({
       }
 
       if (e.key === 'Enter') {
+          // Hide keyboard on mobile
+          el.blur();
+
           // Add to history
           if (searchQuery.trim()) {
             const term = searchQuery.trim();
@@ -543,10 +589,20 @@ export const LogTable: React.FC<LogTableProps> = ({
             setHistoryIndex(-1);
           }
 
-          if (e.shiftKey) {
-              handlePrevMatch();
-          } else {
-              handleNextMatch();
+          if (matchingIndices.length > 0) {
+              if (e.shiftKey) {
+                  handlePrevMatch();
+              } else {
+                  // If we haven't "committed" this search yet (meaning we haven't jumped to the first result after typing),
+                  // jump to the current "nearest" match instead of skipping to the next one.
+                  if (!searchCommitted.current) {
+                      searchCommitted.current = true;
+                      // Jump to the current calculated position
+                      jumpToMatch(currentMatchPos);
+                  } else {
+                      handleNextMatch();
+                  }
+              }
           }
       } 
       
@@ -642,7 +698,6 @@ export const LogTable: React.FC<LogTableProps> = ({
     });
   };
 
-  // Memoize the table rows to avoid unnecessary re-renders when only scrollTop changes in props.
   const tableRows = useMemo(() => {
     if (paginatedData.length === 0) {
         return (
@@ -655,11 +710,8 @@ export const LogTable: React.FC<LogTableProps> = ({
     }
     return paginatedData.map((log) => (
         <tr 
-          key={log.id} 
-          ref={el => {
-            if (el) rowRefs.current.set(log.id, el);
-            else rowRefs.current.delete(log.id);
-          }}
+          key={log.id}
+          id={`log-row-desktop-${log.id}`} 
           onClick={() => {
               if (highlightedRowId === log.id) {
                   setHighlightedRowId(null);
@@ -698,10 +750,7 @@ export const LogTable: React.FC<LogTableProps> = ({
     return paginatedData.map((log) => (
        <div 
           key={log.id}
-          ref={el => {
-            if (el) rowRefs.current.set(log.id, el);
-            else rowRefs.current.delete(log.id);
-          }}
+          id={`log-row-mobile-${log.id}`}
           onClick={() => {
               if (highlightedRowId === log.id) {
                   setHighlightedRowId(null);
@@ -765,6 +814,37 @@ export const LogTable: React.FC<LogTableProps> = ({
        </div>
     ));
   }, [paginatedData, visibleColumns, highlightedRowId, selectedTimezone, keywordsToHighlight, onRowDoubleClick, onKeywordClick]);
+
+  // Search Index Editor
+  const [isEditingMatchIndex, setIsEditingMatchIndex] = useState(false);
+  const [matchIndexInputValue, setMatchIndexInputValue] = useState('');
+  const matchIndexInputRef = useRef<HTMLInputElement>(null);
+
+  const handleMatchIndexDoubleClick = () => {
+      if (matchingIndices.length === 0) return;
+      setMatchIndexInputValue((currentMatchPos + 1).toString());
+      setIsEditingMatchIndex(true);
+      setTimeout(() => matchIndexInputRef.current?.select(), 0);
+  };
+
+  const submitMatchIndex = () => {
+      setIsEditingMatchIndex(false);
+      let val = parseInt(matchIndexInputValue, 10);
+      if (isNaN(val)) return;
+      
+      if (val < 1) val = 1;
+      if (val > matchingIndices.length) val = matchingIndices.length;
+      
+      jumpToMatch(val - 1);
+  };
+
+  const handleMatchIndexKeyDown = (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter') {
+          submitMatchIndex();
+      } else if (e.key === 'Escape') {
+          setIsEditingMatchIndex(false);
+      }
+  };
 
   return (
     <div className="p-2 flex flex-col h-full">
@@ -860,9 +940,25 @@ export const LogTable: React.FC<LogTableProps> = ({
                       </button>
                   </div>
 
-                  <span className="text-[10px] text-gray-500 px-1 min-w-[2.5rem] text-center select-none tabular-nums flex-shrink-0">
-                      {matchingIndices.length > 0 ? `${currentMatchPos + 1}/${matchingIndices.length}` : (searchQuery ? '0/0' : '')}
-                  </span>
+                  {isEditingMatchIndex ? (
+                        <input
+                            ref={matchIndexInputRef}
+                            type="number"
+                            className="w-12 text-[10px] bg-gray-900 border border-blue-500 text-center text-white rounded mx-1 focus:outline-none"
+                            value={matchIndexInputValue}
+                            onChange={(e) => setMatchIndexInputValue(e.target.value)}
+                            onKeyDown={handleMatchIndexKeyDown}
+                            onBlur={submitMatchIndex}
+                        />
+                  ) : (
+                    <span 
+                        className={`text-[10px] text-gray-500 px-1 min-w-[2.5rem] text-center select-none tabular-nums flex-shrink-0 ${matchingIndices.length > 0 ? 'cursor-pointer hover:text-gray-300' : ''}`}
+                        onDoubleClick={handleMatchIndexDoubleClick}
+                        title="Double click to jump to match"
+                    >
+                        {matchingIndices.length > 0 ? `${currentMatchPos + 1}/${matchingIndices.length}` : (searchQuery ? '0/0' : '')}
+                    </span>
+                  )}
                   <div className="flex space-x-0.5 flex-shrink-0">
                     <button 
                         onClick={handlePrevMatch}

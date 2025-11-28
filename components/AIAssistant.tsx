@@ -238,6 +238,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, visib
   
   // Default to Flash as it's balanced
   const [modelTier, setModelTier] = useState<string>('gemini-2.5-flash');
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Ref to hold the WebLLM engine instance to avoid re-init
@@ -573,10 +574,16 @@ User Question: ${userText}
         return;
     }
 
+    // Use process.env.API_KEY exclusively as per guidelines
     const apiKey = process.env.API_KEY;
 
     if (!apiKey) {
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: 'Error: API Key is missing. Please ensure process.env.API_KEY is configured.', isError: true }]);
+      setMessages(prev => [...prev, { 
+          id: Date.now().toString(), 
+          role: 'model', 
+          text: 'Error: API Key is missing. Ensure process.env.API_KEY is properly configured in your environment.', 
+          isError: true 
+      }]);
       return;
     }
 
@@ -586,7 +593,7 @@ User Question: ${userText}
     const historyStartIndex = chatHistoryRef.current.length;
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: apiKey });
       // Use the selected model tier directly as the model name
       const modelName = modelTier;
       const model = ai.models;
@@ -681,7 +688,7 @@ User Question: ${userText}
               }
           }
           if (msg.includes('API_KEY')) {
-              errorMessage = "Invalid API Key. Please check your settings.";
+              errorMessage = "Invalid API Key. Please check your environment configuration.";
           }
       }
       
@@ -730,6 +737,7 @@ User Question: ${userText}
 
   return (
     <div className="fixed inset-y-0 right-0 z-40 w-full md:w-96 bg-gray-800 shadow-2xl border-l border-gray-700 flex flex-col transform transition-transform duration-300 ease-in-out">
+      
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-gray-700 bg-gray-900">
         <div className="flex items-center space-x-2">

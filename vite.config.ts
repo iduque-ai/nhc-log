@@ -10,9 +10,11 @@ export default defineConfig(() => {
 
   return {
     plugins: [react()],
-    // Fixed: Define process.env.API_KEY to be available in the browser
+    // FIX: Define import.meta.env.VITE_API_KEY and process.env.API_KEY to be available in the browser code
+    // This maps the system environment variable (API_KEY) to the Vite frontend variable.
     define: {
-      'process.env.API_KEY': JSON.stringify(apiKey),
+      'import.meta.env.VITE_API_KEY': JSON.stringify(apiKey || ""),
+      'process.env.API_KEY': JSON.stringify(apiKey || ""),
     },
   };
 })

@@ -38,7 +38,7 @@ export const LogViewer: React.FC<LogViewerProps> = ({
     selectedTimezone, 
     totalDaemonCount, 
     keywordQueries, 
-    enableKeywordHighlight,
+    enableKeywordHighlight, 
     onRowDoubleClick,
     onKeywordClick,
     scrollToLogId,
@@ -72,14 +72,14 @@ export const LogViewer: React.FC<LogViewerProps> = ({
                 <nav className="flex space-x-1 p-1" aria-label="Log Views">
                     <button
                         onClick={() => setActiveView('summary')}
-                        className={`py-2 px-4 rounded-md text-sm font-medium transition-colors ${activeView === 'summary' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-600'}`}
+                        className={`py-1 px-3 rounded-md text-xs font-medium transition-colors ${activeView === 'summary' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-600'}`}
                         aria-current={activeView === 'summary' ? 'page' : undefined}
                     >
                         Summary Statistics
                     </button>
                     <button
                         onClick={() => setActiveView('data')}
-                        className={`py-2 px-4 rounded-md text-sm font-medium transition-colors ${activeView === 'data' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-600'}`}
+                        className={`py-1 px-3 rounded-md text-xs font-medium transition-colors ${activeView === 'data' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-600'}`}
                         aria-current={activeView === 'data' ? 'page' : undefined}
                     >
                         Log Data

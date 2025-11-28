@@ -56,13 +56,13 @@ const COLUMN_NAMES: Record<typeof ALL_COLUMNS[number], string> = {
 // Map column keys to specific width classes to ensure alignment.
 // Using max-w-[X] combined with w-[X] enforces fixed width and triggers truncation for overflow.
 const COLUMN_WIDTHS: Record<string, string> = {
-    timestamp: 'w-48 min-w-[12rem]',
-    level: 'w-28', // Fixed width approx 112px, enough for UNKNOWN
-    daemon: 'w-36 max-w-[9rem]', // Reduced by 40% from 15rem to 9rem
-    hostname: 'w-32 max-w-[8rem]',
-    pid: 'w-20',
-    module: 'w-36 max-w-[9rem]', // Reduced by 40% from 15rem to 9rem
-    functionName: 'w-40 max-w-[10rem]',
+    timestamp: 'w-40 min-w-[10rem]',
+    level: 'w-24',
+    daemon: 'w-32 max-w-[8rem]',
+    hostname: 'w-28 max-w-[7rem]',
+    pid: 'w-16',
+    module: 'w-32 max-w-[8rem]',
+    functionName: 'w-32 max-w-[8rem]',
     message: 'w-auto'
 };
 
@@ -90,22 +90,22 @@ const ColumnSelector: React.FC<{
 
     return (
         <div className="relative" ref={wrapperRef}>
-            <button onClick={() => setIsOpen(!isOpen)} className="bg-gray-700 text-white px-4 py-2 rounded-md hover:bg-gray-600 transition-colors text-sm">
+            <button onClick={() => setIsOpen(!isOpen)} className="bg-gray-700 text-white px-3 py-1 rounded-md hover:bg-gray-600 transition-colors text-xs">
                 Columns
             </button>
             {isOpen && (
-                <div className="absolute right-0 mt-2 w-56 bg-gray-800 border border-gray-600 rounded-md shadow-lg z-20">
+                <div className="absolute right-0 mt-1 w-48 bg-gray-800 border border-gray-600 rounded-md shadow-lg z-20">
                     <ul className="py-1">
                         {ALL_COLUMNS.map(col => {
                             // User request: Always allow selecting daemon column
                             return (
-                                <li key={col} className="px-3 py-2 hover:bg-gray-700 cursor-pointer text-gray-300 text-sm">
+                                <li key={col} className="px-3 py-1 hover:bg-gray-700 cursor-pointer text-gray-300 text-xs">
                                     <label className="flex items-center space-x-2">
                                         <input
                                             type="checkbox"
                                             checked={!!visibleColumns[col]}
                                             onChange={() => toggleColumn(col)}
-                                            className="h-4 w-4 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
+                                            className="h-3 w-3 rounded bg-gray-700 border-gray-600 text-blue-600 focus:ring-blue-500"
                                         />
                                         <span>{COLUMN_NAMES[col]}</span>
                                     </label>
@@ -586,7 +586,7 @@ export const LogTable: React.FC<LogTableProps> = ({
           return isKeyword ? (
             <button
               key={index}
-              className="bg-yellow-500 text-black px-1 rounded-sm hover:bg-yellow-400 focus:outline-none focus:ring-2 focus:ring-yellow-300"
+              className="bg-yellow-500 text-black px-0.5 rounded-sm hover:bg-yellow-400 focus:outline-none focus:ring-1 focus:ring-yellow-300"
               onClick={(e) => {
                 e.stopPropagation();
                 if (onKeywordClick) onKeywordClick(part);
@@ -619,7 +619,7 @@ export const LogTable: React.FC<LogTableProps> = ({
     if (paginatedData.length === 0) {
         return (
             <tr>
-                <td colSpan={displayedColumns.length + 2} className="text-center py-10 text-gray-400">
+                <td colSpan={displayedColumns.length + 2} className="text-center py-6 text-gray-400 text-xs">
                     No logs match the current filters.
                 </td>
             </tr>
@@ -637,40 +637,40 @@ export const LogTable: React.FC<LogTableProps> = ({
             hover:bg-gray-700/50 
             ${onRowDoubleClick ? 'cursor-pointer' : ''}
             ${highlightedRowId === log.id ? 'bg-blue-800/60' : ''}
-            transition-colors duration-500
+            transition-colors duration-200
           `}
         >
-          <td className={`px-4 py-4 whitespace-nowrap text-sm text-gray-400 font-mono ${COLUMN_WIDTHS.timestamp}`}>{formatTimestamp(log.timestamp, selectedTimezone)}</td>
-          {visibleColumns.level && <td className={`px-3 py-4 whitespace-nowrap ${COLUMN_WIDTHS.level}`}><span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${levelColorMap[log.level]}`}>{log.level}</span></td>}
-          {visibleColumns.daemon && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.daemon}`}><div className="truncate" title={log.daemon}>{log.daemon}</div></td>}
-          {visibleColumns.hostname && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.hostname}`}><div className="truncate" title={log.hostname}>{log.hostname}</div></td>}
-          {visibleColumns.pid && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.pid}`}>{log.pid}</td>}
-          {visibleColumns.module && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.module}`}><div className="truncate" title={log.module}>{log.module}</div></td>}
-          {visibleColumns.message && <td className={`px-3 py-4 text-sm text-gray-300 font-mono break-all ${COLUMN_WIDTHS.message}`}>{keywordsToHighlight.length > 0 ? highlightKeywords(log.message, keywordsToHighlight, onKeywordClick) : log.message}</td>}
-          {visibleColumns.functionName && <td className={`px-3 py-4 whitespace-nowrap text-sm text-gray-300 ${COLUMN_WIDTHS.functionName}`}><div className="truncate" title={log.functionName}>{log.functionName}</div></td>}
+          <td className={`px-2 py-1 whitespace-nowrap text-xs text-gray-400 font-mono ${COLUMN_WIDTHS.timestamp}`}>{formatTimestamp(log.timestamp, selectedTimezone)}</td>
+          {visibleColumns.level && <td className={`px-2 py-1 whitespace-nowrap ${COLUMN_WIDTHS.level}`}><span className={`px-1.5 py-0.5 inline-flex text-[10px] leading-tight font-semibold rounded-sm ${levelColorMap[log.level]}`}>{log.level}</span></td>}
+          {visibleColumns.daemon && <td className={`px-2 py-1 whitespace-nowrap text-xs text-gray-300 ${COLUMN_WIDTHS.daemon}`}><div className="truncate" title={log.daemon}>{log.daemon}</div></td>}
+          {visibleColumns.hostname && <td className={`px-2 py-1 whitespace-nowrap text-xs text-gray-300 ${COLUMN_WIDTHS.hostname}`}><div className="truncate" title={log.hostname}>{log.hostname}</div></td>}
+          {visibleColumns.pid && <td className={`px-2 py-1 whitespace-nowrap text-xs text-gray-300 ${COLUMN_WIDTHS.pid}`}>{log.pid}</td>}
+          {visibleColumns.module && <td className={`px-2 py-1 whitespace-nowrap text-xs text-gray-300 ${COLUMN_WIDTHS.module}`}><div className="truncate" title={log.module}>{log.module}</div></td>}
+          {visibleColumns.message && <td className={`px-2 py-1 text-xs text-gray-300 font-mono break-all ${COLUMN_WIDTHS.message}`}>{keywordsToHighlight.length > 0 ? highlightKeywords(log.message, keywordsToHighlight, onKeywordClick) : log.message}</td>}
+          {visibleColumns.functionName && <td className={`px-2 py-1 whitespace-nowrap text-xs text-gray-300 ${COLUMN_WIDTHS.functionName}`}><div className="truncate" title={log.functionName}>{log.functionName}</div></td>}
         </tr>
     ));
   }, [paginatedData, visibleColumns, highlightedRowId, selectedTimezone, keywordsToHighlight, onRowDoubleClick, onKeywordClick]);
 
   return (
-    <div className="p-4 flex flex-col h-full">
-      <div className="flex justify-between items-center mb-4">
-        <p className="text-gray-400">Showing <span className="font-bold text-white">{data.length.toLocaleString()}</span> of <span className="font-bold text-white">{totalCount.toLocaleString()}</span> logs</p>
-        <div className="flex items-center space-x-4">
+    <div className="p-2 flex flex-col h-full">
+      <div className="flex justify-between items-center mb-2">
+        <p className="text-gray-400 text-xs">Showing <span className="font-bold text-white">{data.length.toLocaleString()}</span> of <span className="font-bold text-white">{totalCount.toLocaleString()}</span> logs</p>
+        <div className="flex items-center space-x-2">
             <ColumnSelector visibleColumns={visibleColumns} setVisibleColumns={setVisibleColumns} totalDaemonCount={totalDaemonCount} />
             
-            <div className="pl-4 border-l border-gray-700 flex items-center space-x-2">
+            <div className="pl-2 border-l border-gray-700 flex items-center space-x-1">
                 <button
                   onClick={() => exportToTxt(data, selectedTimezone, visibleColumns)}
-                  className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition-colors text-sm"
+                  className="bg-green-600 text-white px-2 py-1 rounded-md hover:bg-green-700 transition-colors text-xs"
                 >
-                  Export to TXT
+                  TXT
                 </button>
                 <button
                   onClick={() => exportToCsv(data, selectedTimezone)}
-                  className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 transition-colors text-sm"
+                  className="bg-blue-600 text-white px-2 py-1 rounded-md hover:bg-blue-700 transition-colors text-xs"
                 >
-                  Export to CSV
+                  CSV
                 </button>
             </div>
         </div>
@@ -680,9 +680,9 @@ export const LogTable: React.FC<LogTableProps> = ({
         <table className="min-w-full divide-y divide-gray-700">
           <thead className="bg-gray-800 sticky top-0 z-10">
             <tr>
-              <th scope="col" className={`px-4 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider ${COLUMN_WIDTHS.timestamp}`}>Timestamp</th>
+              <th scope="col" className={`px-2 py-2 text-left text-xs font-medium text-gray-300 uppercase tracking-wider ${COLUMN_WIDTHS.timestamp}`}>Timestamp</th>
               {displayedColumns.map(col => (
-                  <th key={col} scope="col" className={`px-3 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider ${COLUMN_WIDTHS[col]}`}>{COLUMN_NAMES[col]}</th>
+                  <th key={col} scope="col" className={`px-2 py-2 text-left text-xs font-medium text-gray-300 uppercase tracking-wider ${COLUMN_WIDTHS[col]}`}>{COLUMN_NAMES[col]}</th>
               ))}
             </tr>
           </thead>
@@ -693,18 +693,18 @@ export const LogTable: React.FC<LogTableProps> = ({
       </div>
 
       {data.length > 0 && (
-        <div className="relative flex flex-col sm:flex-row justify-between items-center mt-4 gap-4 sm:gap-0">
+        <div className="relative flex flex-col sm:flex-row justify-between items-center mt-2 gap-2 sm:gap-0">
           
           {/* Left: Rows Per Page */}
-          <div className="flex items-center space-x-2 z-10 order-2 sm:order-1">
-              <label htmlFor="logs-per-page" className="text-sm text-gray-400">Rows:</label>
+          <div className="flex items-center space-x-1 z-10 order-2 sm:order-1">
+              <label htmlFor="logs-per-page" className="text-xs text-gray-400">Rows:</label>
               <select
                   id="logs-per-page"
                   value={logsPerPage}
                   onChange={(e) => {
                     onLogsPerPageChange(Number(e.target.value));
                   }}
-                  className="bg-gray-700 text-white rounded-md py-1 px-2 text-sm border border-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  className="bg-gray-700 text-white rounded-md py-0.5 px-1.5 text-xs border border-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500"
               >
                   {[50, 100, 500, 1000, 5000].map(size => (
                       <option key={size} value={size}>{size}</option>
@@ -715,14 +715,14 @@ export const LogTable: React.FC<LogTableProps> = ({
           {/* Center: Find in Tab */}
           <div className="z-0 w-full sm:w-auto flex justify-center order-1 sm:order-2 sm:absolute sm:left-1/2 sm:top-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2">
               <div className="flex items-center bg-gray-800 rounded-md border border-gray-600 p-0.5 shadow-sm">
-                  <div className="pl-2 pr-1 text-gray-400">
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                  <div className="pl-1 pr-0.5 text-gray-400">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                   </div>
                   <input 
                       ref={searchInputRef}
                       type="text" 
                       placeholder="Search (Ctrl+F)" 
-                      className="bg-transparent border-none text-white text-sm focus:ring-0 w-32 sm:w-64 placeholder-gray-500"
+                      className="bg-transparent border-none text-white text-xs focus:ring-0 w-24 sm:w-48 placeholder-gray-500 py-0.5"
                       value={searchQuery}
                       onChange={handleSearchChange}
                       onKeyDown={handleSearchKeyDown}
@@ -732,56 +732,56 @@ export const LogTable: React.FC<LogTableProps> = ({
                   <div className="flex items-center space-x-0.5 border-r border-gray-700 pr-1 mr-1">
                       <button
                           onClick={() => onSearchMatchCaseChange(!searchMatchCase)}
-                          className={`p-1 rounded text-xs font-medium w-6 h-6 flex items-center justify-center transition-colors ${searchMatchCase ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
+                          className={`p-0.5 rounded text-[10px] font-medium w-5 h-5 flex items-center justify-center transition-colors ${searchMatchCase ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
                           title="Match Case"
                       >
                           Aa
                       </button>
                       <button
                           onClick={() => onSearchMatchWholeWordChange(!searchMatchWholeWord)}
-                          className={`p-1 rounded text-xs font-medium w-6 h-6 flex items-center justify-center transition-colors ${searchMatchWholeWord ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
+                          className={`p-0.5 rounded text-[10px] font-medium w-5 h-5 flex items-center justify-center transition-colors ${searchMatchWholeWord ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
                           title="Match Whole Word"
                       >
                           <span className="underline decoration-1 underline-offset-2">ab</span>
                       </button>
                       <button
                           onClick={() => onSearchUseRegexChange(!searchUseRegex)}
-                          className={`p-1 rounded text-xs font-medium w-6 h-6 flex items-center justify-center transition-colors ${searchUseRegex ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
+                          className={`p-0.5 rounded text-[10px] font-medium w-5 h-5 flex items-center justify-center transition-colors ${searchUseRegex ? 'bg-gray-600 text-white' : 'text-gray-400 hover:bg-gray-700 hover:text-gray-300'}`}
                           title="Use Regular Expression"
                       >
                           .*
                       </button>
                   </div>
 
-                  <span className="text-xs text-gray-500 px-1 min-w-[3rem] text-center select-none tabular-nums">
+                  <span className="text-[10px] text-gray-500 px-1 min-w-[2.5rem] text-center select-none tabular-nums">
                       {matchingIndices.length > 0 ? `${currentMatchPos + 1}/${matchingIndices.length}` : (searchQuery ? '0/0' : '')}
                   </span>
                   <button 
                       onClick={handlePrevMatch}
                       disabled={currentMatchPos === 0 || matchingIndices.length === 0}
-                      className={`p-1 rounded ${currentMatchPos === 0 || matchingIndices.length === 0 ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
+                      className={`p-0.5 rounded ${currentMatchPos === 0 || matchingIndices.length === 0 ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
                       title="Find Previous (Shift+Enter / Alt+Up)"
                   >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 15l7-7 7 7"></path></svg>
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 15l7-7 7 7"></path></svg>
                   </button>
                   <button 
                       onClick={handleNextMatch}
                       disabled={currentMatchPos === matchingIndices.length - 1 || matchingIndices.length === 0}
-                      className={`p-1 rounded ${currentMatchPos === matchingIndices.length - 1 || matchingIndices.length === 0 ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
+                      className={`p-0.5 rounded ${currentMatchPos === matchingIndices.length - 1 || matchingIndices.length === 0 ? 'text-gray-600 cursor-not-allowed' : 'text-gray-400 hover:text-white hover:bg-gray-700'}`}
                       title="Find Next (Enter / Alt+Down)"
                   >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
                   </button>
               </div>
           </div>
 
           {/* Right: Pagination */}
-          <div className="flex items-center space-x-2 z-10 order-3">
-            <button onClick={handlePrevPage} disabled={currentPage === 1} className="p-1.5 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Previous Page (Left Arrow)">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
+          <div className="flex items-center space-x-1 z-10 order-3">
+            <button onClick={handlePrevPage} disabled={currentPage === 1} className="p-1 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Previous Page (Left Arrow)">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
             </button>
             
-            <div className="flex items-center space-x-1 text-sm text-gray-400">
+            <div className="flex items-center space-x-1 text-xs text-gray-400">
                 <span>Page</span>
                 <input 
                     type="number"
@@ -791,13 +791,13 @@ export const LogTable: React.FC<LogTableProps> = ({
                     onChange={(e) => setPageInput(e.target.value)}
                     onBlur={handlePageInputSubmit}
                     onKeyDown={handlePageInputKeyDown}
-                    className="w-12 text-center bg-gray-700 border border-gray-600 rounded text-white py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-500 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-inner-spin-button]:m-0 [appearance:textfield]"
+                    className="w-10 text-center bg-gray-700 border border-gray-600 rounded text-white py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-500 [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-inner-spin-button]:m-0 [appearance:textfield]"
                 />
                 <span>of {totalPages}</span>
             </div>
 
-            <button onClick={handleNextPage} disabled={currentPage === totalPages} className="p-1.5 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Next Page (Right Arrow)">
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
+            <button onClick={handleNextPage} disabled={currentPage === totalPages} className="p-1 text-gray-400 bg-gray-700 rounded-md hover:bg-gray-600 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed" title="Next Page (Right Arrow)">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
             </button>
           </div>
         </div>

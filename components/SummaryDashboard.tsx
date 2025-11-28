@@ -1,4 +1,3 @@
-
 import React, { useEffect, useReducer, useMemo, useRef } from 'react';
 import { LogEntry, LogLevel } from '../types.ts';
 import { formatDuration } from '../utils/helpers.ts';
@@ -8,26 +7,26 @@ interface SummaryDashboardProps {
 }
 
 const StatCard: React.FC<{ title: string; value: string | number }> = ({ title, value }) => (
-    <div className="bg-gray-800 p-4 rounded-lg border border-gray-700 text-center">
-        <p className="text-3xl font-bold text-white">{value}</p>
-        <p className="text-sm text-gray-400">{title}</p>
+    <div className="bg-gray-800 p-2 rounded-lg border border-gray-700 text-center">
+        <p className="text-xl font-bold text-white">{value}</p>
+        <p className="text-xs text-gray-400">{title}</p>
     </div>
 );
 
 const ChartCard: React.FC<React.PropsWithChildren<{ title: string; className?: string }>> = ({ title, children, className = '' }) => (
-    <div className={`bg-gray-800 p-4 rounded-lg border border-gray-700 ${className}`}>
-        <h3 className="text-lg font-semibold text-gray-200 mb-4">{title}</h3>
-        <div className="h-80 relative">
+    <div className={`bg-gray-800 p-2 rounded-lg border border-gray-700 ${className}`}>
+        <h3 className="text-sm font-semibold text-gray-200 mb-2">{title}</h3>
+        <div className="h-56 relative">
             {children}
         </div>
     </div>
 );
 
 const LoadingCharts: React.FC = () => (
-    <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <ChartCard title="Logs by Level"><div className="flex items-center justify-center h-full text-gray-400">Loading Chart...</div></ChartCard>
-        <ChartCard title="Top 10 Daemons"><div className="flex items-center justify-center h-full text-gray-400">Loading Chart...</div></ChartCard>
-        <ChartCard title="Top 10 Functions" className="lg:col-span-2"><div className="flex items-center justify-center h-full text-gray-400">Loading Chart...</div></ChartCard>
+    <div className="p-2 grid grid-cols-1 lg:grid-cols-2 gap-2">
+        <ChartCard title="Logs by Level"><div className="flex items-center justify-center h-full text-gray-400 text-xs">Loading Chart...</div></ChartCard>
+        <ChartCard title="Top 10 Daemons"><div className="flex items-center justify-center h-full text-gray-400 text-xs">Loading Chart...</div></ChartCard>
+        <ChartCard title="Top 10 Functions" className="lg:col-span-2"><div className="flex items-center justify-center h-full text-gray-400 text-xs">Loading Chart...</div></ChartCard>
     </div>
 );
 
@@ -137,7 +136,15 @@ export const SummaryDashboard: React.FC<SummaryDashboardProps> = ({ data }) => {
         titleColor: '#e5e7eb',
         bodyColor: '#d1d5db',
         borderColor: '#374151',
-        borderWidth: 1
+        borderWidth: 1,
+        titleFont: { size: 10 },
+        bodyFont: { size: 10 },
+        padding: 6
+    };
+    
+    const commonScaleOptions = {
+        x: { ticks: { color: '#9ca3af', font: { size: 10 } }, grid: { color: '#374151' } },
+        y: { ticks: { color: '#9ca3af', font: { size: 10 } }, grid: { display: false } }
     };
 
     const createOrUpdateChart = (key: string, ref: React.RefObject<HTMLCanvasElement>, type: any, data: any, options: any) => {
@@ -159,7 +166,7 @@ export const SummaryDashboard: React.FC<SummaryDashboardProps> = ({ data }) => {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-            legend: { position: 'right', labels: { color: '#9ca3af' } },
+            legend: { position: 'right', labels: { color: '#9ca3af', font: { size: 10 }, boxWidth: 10 } },
             tooltip: commonTooltipOptions,
         }
     });
@@ -169,10 +176,7 @@ export const SummaryDashboard: React.FC<SummaryDashboardProps> = ({ data }) => {
         datasets: [{ label: 'Count', data: topDaemons.map(d => d.count), backgroundColor: '#10b981' }]
     }, {
         indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-        scales: {
-            x: { ticks: { color: '#9ca3af' }, grid: { color: '#374151' } },
-            y: { ticks: { color: '#9ca3af' }, grid: { display: false } }
-        },
+        scales: commonScaleOptions,
         plugins: { legend: { display: false }, tooltip: commonTooltipOptions }
     });
 
@@ -181,10 +185,7 @@ export const SummaryDashboard: React.FC<SummaryDashboardProps> = ({ data }) => {
         datasets: [{ label: 'Count', data: topFunctions.map(d => d.count), backgroundColor: '#f97316' }]
     }, {
         indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-        scales: {
-            x: { ticks: { color: '#9ca3af' }, grid: { color: '#374151' } },
-            y: { ticks: { color: '#9ca3af' }, grid: { display: false } }
-        },
+        scales: commonScaleOptions,
         plugins: { legend: { display: false }, tooltip: commonTooltipOptions }
     });
 
@@ -197,18 +198,18 @@ export const SummaryDashboard: React.FC<SummaryDashboardProps> = ({ data }) => {
     return <LoadingCharts />;
   }
   
-  const NoDataMessage = () => <div className="flex items-center justify-center h-full text-gray-400">No data to display for the current filters.</div>;
+  const NoDataMessage = () => <div className="flex items-center justify-center h-full text-gray-400 text-xs">No data to display for the current filters.</div>;
 
   return (
-    <div className="p-4 space-y-4">
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="p-2 space-y-2">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
           <StatCard title="Total Logs" value={totalLogs.toLocaleString()} />
           <StatCard title="Error Rate" value={errorRate} />
           <StatCard title="Time Span" value={timeSpan} />
           <StatCard title="Unique Daemons" value={uniqueDaemonCount.toLocaleString()} />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
           <ChartCard title="Logs by Level">
               {levelCounts.length > 0 ? <canvas ref={levelChartRef}></canvas> : <NoDataMessage />}
           </ChartCard>

@@ -173,7 +173,7 @@ const KeywordFilter: React.FC<KeywordFilterProps> = ({
           </div>
       </div>
       <div className="flex space-x-1 mb-0.5">
-        <div className="relative flex-grow">
+        <div className="relative flex-grow min-w-0">
           <input
             type="text"
             id="keyword"
@@ -200,7 +200,7 @@ const KeywordFilter: React.FC<KeywordFilterProps> = ({
         <button
           onClick={handleAddQuery}
           disabled={disabled || !inputValue.trim()}
-          className="bg-indigo-600 text-white px-2 py-1 rounded-md hover:bg-indigo-700 transition-colors text-[10px] font-medium disabled:bg-gray-600 disabled:cursor-not-allowed"
+          className="bg-indigo-600 text-white px-2 py-1 rounded-md hover:bg-indigo-700 transition-colors text-[10px] font-medium disabled:bg-gray-600 disabled:cursor-not-allowed flex-shrink-0"
         >
           Add
         </button>
@@ -245,13 +245,13 @@ const KeywordFilter: React.FC<KeywordFilterProps> = ({
         {queries.map((q) => {
           const isFixed = fixedQueries.includes(q);
           return (
-            <div key={q} className={`flex items-center text-[10px] font-medium pl-1.5 pr-1 py-0 rounded-full ${isFixed ? 'bg-gray-700 text-gray-400 cursor-default' : 'bg-gray-600 text-gray-200'}`}>
-              <span className="max-w-[8rem] truncate" title={q}>{q}</span>
+            <div key={q} className={`flex items-center text-[10px] font-medium pl-1.5 pr-1 py-0 rounded-full max-w-full ${isFixed ? 'bg-gray-700 text-gray-400 cursor-default' : 'bg-gray-600 text-gray-200'}`}>
+              <span className="truncate" title={q}>{q}</span>
               {!isFixed && (
                 <button
                   onClick={() => !disabled && handleRemoveQuery(q)}
                   disabled={disabled}
-                  className="ml-0.5 text-gray-400 hover:text-white rounded-full focus:outline-none focus:ring-1 focus:ring-white disabled:opacity-50"
+                  className="ml-0.5 text-gray-400 hover:text-white rounded-full focus:outline-none focus:ring-1 focus:ring-white disabled:opacity-50 flex-shrink-0"
                   aria-label={`Remove filter: ${q}`}
                 >
                   <svg className="h-2.5 w-2.5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" /></svg>
@@ -293,7 +293,7 @@ const DataSources: React.FC<{
       </button>
       {isOpen && (
         <div className="space-y-1">
-          <div className="max-h-20 overflow-y-auto space-y-0.5 pr-1">
+          <div className="max-h-20 overflow-y-auto overflow-x-hidden space-y-0.5 pr-1">
               {fileInfos.map(file => (
                 <div key={file.id} className="flex justify-between items-center bg-gray-800 p-1 rounded-md">
                   <div className="text-[10px] flex-1 min-w-0 pr-1">
@@ -386,9 +386,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   };
 
   return (
-    <aside className="w-60 bg-gray-800 flex flex-col p-2 border-r border-gray-700 h-full text-xs">
+    <aside className="w-60 bg-gray-800 flex flex-col p-2 border-r border-gray-700 h-full text-xs overflow-hidden">
       <div className="flex justify-between items-center mb-2">
-        <h1 className="text-base font-bold text-white">NHC Log Viewer</h1>
+        <h1 className="text-base font-bold text-white truncate">NHC Log Viewer</h1>
         <button 
            onClick={onCloseMobile}
            className="md:hidden p-1 text-gray-400 hover:text-white rounded-md hover:bg-gray-700"
@@ -405,7 +405,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         disabled={isLoading}
       />
 
-      <div className="flex-grow space-y-2 pt-2 overflow-y-auto min-h-0">
+      <div className="flex-grow space-y-2 pt-2 overflow-y-auto overflow-x-hidden min-h-0">
         <div className="flex justify-between items-center">
              <h2 className="text-sm font-bold text-white">Filters</h2>
              <div className="flex space-x-0.5">
@@ -509,7 +509,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         value={selectedTimezone}
                         onChange={(e) => setSelectedTimezone(e.target.value)}
                         disabled={isLoading}
-                        className="bg-gray-800 border border-gray-600 text-white rounded px-1 py-0.5 text-[10px] focus:outline-none focus:ring-1 focus:ring-blue-500 appearance-none pr-4 cursor-pointer"
+                        className="bg-gray-800 border border-gray-600 text-white rounded px-1 py-0.5 text-[10px] focus:outline-none focus:ring-1 focus:ring-blue-500 appearance-none pr-4 cursor-pointer max-w-[100px] truncate"
                         title="Select Timezone"
                     >
                         <option value="local">Local</option>
@@ -538,7 +538,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         value={formatDateForDateTimeLocalInTimezone(dateRange[0], selectedTimezone)}
                         onChange={(e) => handleDateChange(0, e.target.value)}
                         disabled={filtersDisabledEffective}
-                        className="w-full bg-gray-700 border border-gray-600 text-white rounded-md pl-10 pr-1 py-1 text-[10px] focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-800 [color-scheme:dark]"
+                        className="w-full bg-gray-700 border border-gray-600 text-white rounded-md pl-10 pr-1 py-1 text-[10px] focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-800 [color-scheme:dark] max-w-full"
                     />
                      <div className="absolute inset-y-0 right-0 flex items-center pr-1 pointer-events-none text-gray-400">
                          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -555,7 +555,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         value={formatDateForDateTimeLocalInTimezone(dateRange[1], selectedTimezone)}
                         onChange={(e) => handleDateChange(1, e.target.value)}
                         disabled={filtersDisabledEffective}
-                         className="w-full bg-gray-700 border border-gray-600 text-white rounded-md pl-10 pr-1 py-1 text-[10px] focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-800 [color-scheme:dark]"
+                         className="w-full bg-gray-700 border border-gray-600 text-white rounded-md pl-10 pr-1 py-1 text-[10px] focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-800 [color-scheme:dark] max-w-full"
                     />
                     <div className="absolute inset-y-0 right-0 flex items-center pr-1 pointer-events-none text-gray-400">
                          <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">

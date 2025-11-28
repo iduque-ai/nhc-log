@@ -1,3 +1,4 @@
+
 import React, { useMemo } from 'react';
 import { FilterState, LogLevel, FileInfo } from '../types.ts';
 import { CustomMultiSelect } from './CustomMultiSelect.tsx';
@@ -25,6 +26,7 @@ interface SidebarProps {
   onExportFilters: () => void;
   onImportFilters: (file: File) => void;
   isAllLogs: boolean;
+  onCloseMobile?: () => void;
 }
 
 const logLevels = Object.values(LogLevel);
@@ -346,6 +348,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onExportFilters,
   onImportFilters,
   isAllLogs,
+  onCloseMobile,
 }) => {
   const { selectedLevels, selectedDaemons, selectedModules, selectedFunctionNames, dateRange, keywordQueries, keywordMatchMode, enableKeywordHighlight } = filterState;
   const filtersDisabledEffective = filtersDisabled || isLoading;
@@ -386,6 +389,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <aside className="w-60 bg-gray-800 flex flex-col p-2 border-r border-gray-700 h-full text-xs">
       <div className="flex justify-between items-center mb-2">
         <h1 className="text-base font-bold text-white">NHC Log Viewer</h1>
+        <button 
+           onClick={onCloseMobile}
+           className="md:hidden p-1 text-gray-400 hover:text-white rounded-md hover:bg-gray-700"
+           aria-label="Close sidebar"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+        </button>
       </div>
 
       <DataSources
@@ -437,6 +447,49 @@ export const Sidebar: React.FC<SidebarProps> = ({
           inputValue={currentKeywordInput}
           onInputValueChange={onCurrentKeywordInputChange}
         />
+
+        <div className="space-y-2">
+            <div>
+            <CustomMultiSelect
+                label="Log Levels"
+                options={logLevels}
+                selected={selectedLevels}
+                onChange={(levels) => onFilterChange({ selectedLevels: levels as LogLevel[] })}
+                disabled={filtersDisabledEffective}
+                fixedSelected={fixedFilters?.selectedLevels}
+            />
+            </div>
+            <div>
+            <CustomMultiSelect
+                label="Daemons"
+                options={allDaemons}
+                selected={selectedDaemons}
+                onChange={(daemons) => onFilterChange({ selectedDaemons: daemons })}
+                disabled={filtersDisabledEffective}
+                fixedSelected={fixedFilters?.selectedDaemons}
+            />
+            </div>
+            <div>
+            <CustomMultiSelect
+                label="Modules"
+                options={uniqueModules}
+                selected={selectedModules}
+                onChange={(modules) => onFilterChange({ selectedModules: modules })}
+                disabled={filtersDisabledEffective}
+                fixedSelected={fixedFilters?.selectedModules}
+            />
+            </div>
+            <div>
+            <CustomMultiSelect
+                label="Function Names"
+                options={uniqueFunctionNames}
+                selected={selectedFunctionNames}
+                onChange={(funcs) => onFilterChange({ selectedFunctionNames: funcs })}
+                disabled={filtersDisabledEffective}
+                fixedSelected={fixedFilters?.selectedFunctionNames}
+            />
+            </div>
+        </div>
 
         <div className="space-y-1">
             <div className="flex justify-between items-center mb-0.5">
@@ -513,48 +566,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
         </div>
 
-        <div className="space-y-2">
-            <div>
-            <CustomMultiSelect
-                label="Log Levels"
-                options={logLevels}
-                selected={selectedLevels}
-                onChange={(levels) => onFilterChange({ selectedLevels: levels as LogLevel[] })}
-                disabled={filtersDisabledEffective}
-                fixedSelected={fixedFilters?.selectedLevels}
-            />
-            </div>
-            <div>
-            <CustomMultiSelect
-                label="Daemons"
-                options={allDaemons}
-                selected={selectedDaemons}
-                onChange={(daemons) => onFilterChange({ selectedDaemons: daemons })}
-                disabled={filtersDisabledEffective}
-                fixedSelected={fixedFilters?.selectedDaemons}
-            />
-            </div>
-            <div>
-            <CustomMultiSelect
-                label="Modules"
-                options={uniqueModules}
-                selected={selectedModules}
-                onChange={(modules) => onFilterChange({ selectedModules: modules })}
-                disabled={filtersDisabledEffective}
-                fixedSelected={fixedFilters?.selectedModules}
-            />
-            </div>
-            <div>
-            <CustomMultiSelect
-                label="Function Names"
-                options={uniqueFunctionNames}
-                selected={selectedFunctionNames}
-                onChange={(funcs) => onFilterChange({ selectedFunctionNames: funcs })}
-                disabled={filtersDisabledEffective}
-                fixedSelected={fixedFilters?.selectedFunctionNames}
-            />
-            </div>
-        </div>
       </div>
       
       <div className="mt-2 space-y-1 border-t border-gray-700 pt-2">

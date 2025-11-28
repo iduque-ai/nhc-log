@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import JSZip from 'jszip';
 import { ungzip } from 'pako';
@@ -256,7 +257,8 @@ const App: React.FC = () => {
   const [editingTabName, setEditingTabName] = useState('');
   const [scrollToLogId, setScrollToLogId] = useState<number | null>(null);
   const [currentKeywordInput, setCurrentKeywordInput] = useState('');
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  // Initialize sidebar based on screen width
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => window.innerWidth >= 768);
   const [draggedTabIndex, setDraggedTabIndex] = useState<number | null>(null);
 
   const fileIdCounter = useRef(0);
@@ -757,35 +759,47 @@ const App: React.FC = () => {
   }, [allDaemons, allModules, allFunctionNames]);
 
   return (
-    <div className="flex h-screen bg-gray-800 text-white font-sans overflow-hidden">
+    <div className="flex h-screen bg-gray-800 text-white font-sans overflow-hidden relative">
       {fileInfos.length > 0 && activeTab ? (
         <>
+          {/* Mobile Backdrop */}
           {isSidebarOpen && (
-              <Sidebar
-                filterState={activeTab.filters}
-                fixedFilters={activeTab.fixedFilters}
-                onFilterChange={handleFilterChange}
-                allDaemons={allDaemons}
-                allModules={allModules}
-                allFunctionNames={allFunctionNames}
-                onNewTab={handleNewTab}
-                isLoading={isLoading}
-                fileInfos={fileInfos}
-                onAppendFiles={handleAppendFiles}
-                onRemoveFile={handleRemoveFile}
-                selectedTimezone={selectedTimezone}
-                setSelectedTimezone={setSelectedTimezone}
-                filtersDisabled={activeTab.id === tabs[0]?.id}
-                currentKeywordInput={currentKeywordInput}
-                onCurrentKeywordInputChange={setCurrentKeywordInput}
-                globalDateRange={globalDateRange}
-                onResetDateRange={handleResetDateRange}
-                onExportFilters={handleExportFilters}
-                onImportFilters={handleImportFilters}
-                isAllLogs={activeTab.id === tabs[0]?.id}
-              />
+            <div 
+              className="fixed inset-0 bg-black/50 z-20 md:hidden"
+              onClick={() => setIsSidebarOpen(false)}
+            />
           )}
-          <main className="flex-1 flex flex-col min-w-0">
+
+          {isSidebarOpen && (
+             <div className="fixed inset-y-0 left-0 z-30 h-full shadow-2xl md:static md:shadow-none md:z-auto bg-gray-800 transition-transform duration-300">
+                  <Sidebar
+                    filterState={activeTab.filters}
+                    fixedFilters={activeTab.fixedFilters}
+                    onFilterChange={handleFilterChange}
+                    allDaemons={allDaemons}
+                    allModules={allModules}
+                    allFunctionNames={allFunctionNames}
+                    onNewTab={handleNewTab}
+                    isLoading={isLoading}
+                    fileInfos={fileInfos}
+                    onAppendFiles={handleAppendFiles}
+                    onRemoveFile={handleRemoveFile}
+                    selectedTimezone={selectedTimezone}
+                    setSelectedTimezone={setSelectedTimezone}
+                    filtersDisabled={activeTab.id === tabs[0]?.id}
+                    currentKeywordInput={currentKeywordInput}
+                    onCurrentKeywordInputChange={setCurrentKeywordInput}
+                    globalDateRange={globalDateRange}
+                    onResetDateRange={handleResetDateRange}
+                    onExportFilters={handleExportFilters}
+                    onImportFilters={handleImportFilters}
+                    isAllLogs={activeTab.id === tabs[0]?.id}
+                    onCloseMobile={() => setIsSidebarOpen(false)}
+                  />
+             </div>
+          )}
+
+          <main className="flex-1 flex flex-col min-w-0 w-full">
             <div className="flex-shrink-0 bg-gray-900 border-b border-gray-700 flex items-center justify-between">
               <div className="flex items-center">
                   <button 

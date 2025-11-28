@@ -74,7 +74,7 @@ const updateFiltersTool: FunctionDeclaration = {
 
 const scrollToLogTool: FunctionDeclaration = {
   name: 'scroll_to_log',
-  description: 'Scroll the viewer to a specific log entry. Use this when you find a specific interesting log ID from the search_logs tool and want to show it to the user.',
+  description: 'Scroll the viewer to a specific log entry. Use this when you find a specific log ID from the search_logs tool and want to show it to the user.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -240,8 +240,24 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, visib
   const [modelTier, setModelTier] = useState<string>('gemini-2.5-flash');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // FIX: Removed UI for API key management to comply with security guidelines.
-  // The API key is now strictly obtained from process.env.API_KEY.
+  // API Key Management
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [userApiKey, setUserApiKey] = useState('');
+  const [tempApiKey, setTempApiKey] = useState('');
+
+  useEffect(() => {
+      const storedKey = localStorage.getItem('nhc_log_viewer_api_key');
+      if (storedKey) {
+          setUserApiKey(storedKey);
+          setTempApiKey(storedKey);
+      }
+  }, []);
+
+  const handleSaveSettings = () => {
+      localStorage.setItem('nhc_log_viewer_api_key', tempApiKey.trim());
+      setUserApiKey(tempApiKey.trim());
+      setIsSettingsOpen(false);
+  };
 
   // Ref to hold the WebLLM engine instance to avoid re-init
   const webLlmEngineRef = useRef<any>(null);
@@ -478,24 +494,11 @@ User Question: ${userText}
     try {
         if (!webLlmEngineRef.current) {
              setDownloadProgress("Initializing engine...");
-             // Provide explicit appConfig to ensure the model ID can be resolved.
              const engine = await CreateMLCEngine(
                  WEB_LLM_MODEL_ID,
                  {
                      initProgressCallback: (report) => {
                          setDownloadProgress(report.text);
-                     },
-                     appConfig: {
-                        model_list: [
-                            {
-                                "model_id": WEB_LLM_MODEL_ID,
-                                // Fix for "Failed to execute add on Cache": Use v0.2.72 compatible library path for WASM
-                                "model_lib": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0.2.72/Llama-3.2-3B-Instruct-q4f16_1-ctx4k_cs1k-webgpu.wasm",
-                                "model": "https://huggingface.co/mlc-ai/Llama-3.2-3B-Instruct-q4f16_1-MLC",
-                                "vram_required_MB": 3000,
-                                "low_resource_required": true,
-                            }
-                        ]
                      }
                  }
              );
@@ -570,14 +573,17 @@ User Question: ${userText}
         return;
     }
 
-    // FIX: Using process.env.API_KEY directly as required by guidelines.
-    if (!process.env.API_KEY) {
+    // Determine API Key: Prioritize process.env (set at build), fallback to user localStorage
+    const effectiveApiKey = process.env.API_KEY || userApiKey;
+
+    if (!effectiveApiKey) {
       setMessages(prev => [...prev, { 
           id: Date.now().toString(), 
           role: 'model', 
-          text: 'Error: API Key is missing. Please ensure the API_KEY environment variable is set in your configuration.', 
+          text: 'Error: API Key is missing. Please click the Settings icon (⚙️) above to enter your Google Gemini API Key.', 
           isError: true 
       }]);
+      setIsSettingsOpen(true); // Open settings to prompt user
       return;
     }
 
@@ -587,8 +593,7 @@ User Question: ${userText}
     const historyStartIndex = chatHistoryRef.current.length;
 
     try {
-      // FIX: Initializing GoogleGenAI with named parameter apiKey from process.env.API_KEY.
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: effectiveApiKey });
       // Use the selected model tier directly as the model name
       const modelName = modelTier;
       const model = ai.models;
@@ -683,7 +688,7 @@ User Question: ${userText}
               }
           }
           if (msg.includes('API_KEY')) {
-              errorMessage = "Invalid API Key. Please check your environment configuration.";
+              errorMessage = "Invalid API Key. Please check settings.";
           }
       }
       
@@ -731,6 +736,7 @@ User Question: ${userText}
   if (!isOpen) return null;
 
   return (
+    <>
     <div className="fixed inset-y-0 right-0 z-40 w-full md:w-96 bg-gray-800 shadow-2xl border-l border-gray-700 flex flex-col transform transition-transform duration-300 ease-in-out">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-gray-700 bg-gray-900">
@@ -758,6 +764,13 @@ User Question: ${userText}
             </div>
         </div>
         <div className="flex items-center space-x-1">
+            <button 
+                onClick={() => setIsSettingsOpen(true)}
+                className="text-gray-400 hover:text-white p-1 rounded-md hover:bg-gray-700"
+                title="Settings / API Key"
+            >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+            </button>
              <button 
                 onClick={handleResetChat} 
                 className="text-gray-400 hover:text-red-400 p-1 rounded-md hover:bg-gray-700"
@@ -872,5 +885,52 @@ User Question: ${userText}
         </div>
       </form>
     </div>
+
+    {/* Settings Modal */}
+    {isSettingsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+            <div className="bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-md p-6">
+                <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-lg font-bold text-white">Settings</h3>
+                    <button onClick={() => setIsSettingsOpen(false)} className="text-gray-400 hover:text-white">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+                
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-xs font-medium text-gray-300 mb-1">Google Gemini API Key</label>
+                        <input 
+                            type="password" 
+                            value={tempApiKey}
+                            onChange={(e) => setTempApiKey(e.target.value)}
+                            placeholder="AIza..."
+                            className="w-full bg-gray-900 border border-gray-600 text-white rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                        <p className="text-[10px] text-gray-500 mt-1">
+                            Your key is stored locally in your browser and used only for AI requests. 
+                            If you have set an API_KEY environment variable, it will be prioritized over this one.
+                        </p>
+                    </div>
+                </div>
+
+                <div className="mt-6 flex justify-end space-x-2">
+                    <button 
+                        onClick={() => setIsSettingsOpen(false)}
+                        className="px-4 py-2 bg-gray-700 text-gray-200 text-sm rounded-md hover:bg-gray-600 transition-colors"
+                    >
+                        Cancel
+                    </button>
+                    <button 
+                        onClick={handleSaveSettings}
+                        className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors"
+                    >
+                        Save Key
+                    </button>
+                </div>
+            </div>
+        </div>
+    )}
+    </>
   );
 };

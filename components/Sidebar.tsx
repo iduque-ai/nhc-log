@@ -535,6 +535,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                     <input
                         type="datetime-local"
+                        step="1"
                         value={formatDateForDateTimeLocalInTimezone(dateRange[0], selectedTimezone)}
                         onChange={(e) => handleDateChange(0, e.target.value)}
                         disabled={filtersDisabledEffective}
@@ -552,6 +553,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     </div>
                     <input
                         type="datetime-local"
+                        step="1"
                         value={formatDateForDateTimeLocalInTimezone(dateRange[1], selectedTimezone)}
                         onChange={(e) => handleDateChange(1, e.target.value)}
                         disabled={filtersDisabledEffective}

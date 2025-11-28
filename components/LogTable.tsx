@@ -756,7 +756,7 @@ export const LogTable: React.FC<LogTableProps> = ({
       <div className="flex justify-between items-center mb-2">
         <p className="text-gray-400 text-xs">Showing <span className="font-bold text-white">{data.length.toLocaleString()}</span> of <span className="font-bold text-white">{totalCount.toLocaleString()}</span> logs</p>
         <div className="flex items-center space-x-2">
-            <div className="hidden md:block">
+            <div className="hidden md:block landscape:block">
                 <ColumnSelector visibleColumns={visibleColumns} setVisibleColumns={setVisibleColumns} totalDaemonCount={totalDaemonCount} />
             </div>
             
@@ -778,10 +778,10 @@ export const LogTable: React.FC<LogTableProps> = ({
       </div>
 
       {/* Main Scroll Container shared between Desktop Table and Mobile List */}
-      <div ref={tableContainerRef} onScroll={handleScroll} className="flex-grow overflow-auto bg-gray-900 rounded-lg border border-gray-800 md:border-none">
+      <div ref={tableContainerRef} onScroll={handleScroll} className="flex-grow overflow-auto bg-gray-900 rounded-lg border border-gray-800 md:border-none landscape:border-none">
         
         {/* Desktop View */}
-        <table className="hidden md:table min-w-full divide-y divide-gray-700">
+        <table className="hidden md:table landscape:table min-w-full divide-y divide-gray-700">
           <thead className="bg-gray-800 sticky top-0 z-10">
             <tr>
               <th scope="col" className={`px-2 py-2 text-left text-xs font-medium text-gray-300 uppercase tracking-wider ${COLUMN_WIDTHS.timestamp}`}>Timestamp</th>
@@ -796,7 +796,7 @@ export const LogTable: React.FC<LogTableProps> = ({
         </table>
 
         {/* Mobile View */}
-        <div className="md:hidden p-2">
+        <div className="md:hidden landscape:hidden p-2">
             {mobileRows}
         </div>
       </div>

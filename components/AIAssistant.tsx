@@ -573,8 +573,8 @@ User Question: ${userText}
         return;
     }
 
-    // Determine API Key: Prioritize process.env (set at build), fallback to user localStorage
-    const effectiveApiKey = process.env.API_KEY || userApiKey;
+    // Determine API Key: Prioritize VITE_API_KEY (set at build), fallback to user localStorage
+    const effectiveApiKey = import.meta.env.VITE_API_KEY || userApiKey;
 
     if (!effectiveApiKey) {
       setMessages(prev => [...prev, { 
@@ -909,7 +909,7 @@ User Question: ${userText}
                         />
                         <p className="text-[10px] text-gray-500 mt-1">
                             Your key is stored locally in your browser and used only for AI requests. 
-                            If you have set an API_KEY environment variable, it will be prioritized over this one.
+                            If you have set a VITE_API_KEY environment variable, it will be prioritized over this one.
                         </p>
                     </div>
                 </div>

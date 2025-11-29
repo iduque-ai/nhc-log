@@ -302,7 +302,7 @@ const App: React.FC = () => {
   const [isAIPanelOpen, setIsAIPanelOpen] = useState(false);
 
   const fileIdCounter = useRef(0);
-  const logIdCounter = useRef(0);
+  const logIdCounter = useRef(1);
 
   const processFiles = async (files: File[]): Promise<FileInfo[]> => {
     const newFileInfos: FileInfo[] = [];
@@ -371,7 +371,7 @@ const App: React.FC = () => {
 
   const handleInitialUpload = async (files: File[]) => {
     setIsLoading(true);
-    logIdCounter.current = 0; // Reset for new uploads
+    logIdCounter.current = 1; // Reset for new uploads
     const newFileInfos = await processFiles(files);
     
     const allLogs = newFileInfos.flatMap(f => f.logs);

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GoogleGenAI, Type, FunctionDeclaration, Content, Part } from "@google/genai";
 import { CreateMLCEngine } from "@mlc-ai/web-llm";
 import { LogEntry, FilterState } from '../types.ts';
@@ -113,12 +113,66 @@ const searchLogsTool: FunctionDeclaration = {
   },
 };
 
+const findLogPatternsTool: FunctionDeclaration = {
+  name: 'find_log_patterns',
+  description: 'Analyzes logs to find repeating messages or statistical anomalies in frequency. Useful for spotting trends or systemic issues.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      pattern_type: {
+        type: Type.STRING,
+        enum: ['repeating_error', 'frequency_spike'],
+        description: 'The type of pattern to search for: "repeating_error" finds the most common error messages, "frequency_spike" finds time intervals with an unusually high number of logs.'
+      },
+      time_window_minutes: {
+        type: Type.NUMBER,
+        description: 'Optional. The number of minutes from the end of the log file to analyze. Defaults to the entire log file if not provided.'
+      }
+    },
+    required: ['pattern_type']
+  }
+};
+
+const traceErrorOriginTool: FunctionDeclaration = {
+  name: 'trace_error_origin',
+  description: 'Traces events leading up to a specific log entry to help find the root cause. It looks backwards in time from the given log ID.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      error_log_id: {
+        type: Type.NUMBER,
+        description: 'The numeric ID of the log entry to start the trace from.'
+      },
+      trace_window_seconds: {
+        type: Type.NUMBER,
+        description: 'How many seconds to look backward in time from the error log\'s timestamp. Defaults to 60 seconds.'
+      }
+    },
+    required: ['error_log_id']
+  }
+};
+
+const suggestSolutionTool: FunctionDeclaration = {
+  name: 'suggest_solution',
+  description: 'Provides potential solutions or debugging steps for a given error message. This tool is for getting advice, not for searching logs.',
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      error_message: {
+        type: Type.STRING,
+        description: 'The text of the error message to get a solution for.'
+      }
+    },
+    required: ['error_message']
+  }
+};
+
 // --- Formatted Message Component ---
 
 // Helper to recursively render inline markdown
 const renderInlineMarkdown = (text: string, onScrollToLog: (id: number) => void): React.ReactNode => {
-    // Split by [Log ID: 123]
-    const parts = text.split(/(\[Log ID: \d+\])/g);
+    // Split by [Log ID: 123] and markdown links [text](url)
+    const parts = text.split(/(\[Log ID: \d+\]|\[.*?\]\(.*?\))/g);
 
     return parts.map((part, i) => {
         const logIdMatch = part.match(/^\[Log ID: (\d+)\]$/);
@@ -134,6 +188,16 @@ const renderInlineMarkdown = (text: string, onScrollToLog: (id: number) => void)
                     <svg className="w-3 h-3 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>
                     <span>#{id}</span>
                 </button>
+            );
+        }
+
+        const linkMatch = part.match(/^\[(.*?)\]\((.*?)\)$/);
+        if (linkMatch) {
+            const [, text, url] = linkMatch;
+            return (
+                <a href={url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-200 underline" key={i}>
+                    {text}
+                </a>
             );
         }
 
@@ -226,13 +290,35 @@ const FormattedMessage: React.FC<{ text: string; onScrollToLog: (id: number) => 
 const WEB_LLM_MODEL_ID = "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 const WEBLMM_CONSENT_KEY = 'nhc_log_viewer_webllm_consent';
 
+// Helper to parse a tool call from local model output (raw JSON or markdown)
+const parseLocalToolCall = (text: string): { tool_name: string, arguments: any } | null => {
+    let jsonString = text.trim();
+    const jsonRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
+    const match = jsonString.match(jsonRegex);
+    if (match && match[1]) {
+        jsonString = match[1].trim();
+    }
+
+    if (jsonString.startsWith('{') && jsonString.endsWith('}')) {
+        try {
+            const parsed = JSON.parse(jsonString);
+            if (parsed.tool_name && parsed.arguments) {
+                return parsed;
+            }
+        } catch (e) {
+            // Not valid JSON
+        }
+    }
+    return null;
+};
+
 export const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, visibleLogs, allLogs, allDaemons, onUpdateFilters, onScrollToLog }) => {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([
-    { 
-      id: 'welcome', 
-      role: 'model', 
-      text: 'Hello! I can help you analyze these logs. Ask me questions like "Why did the charger fail?", "Search for wifi errors", or "Summarize the errors from yesterday".' 
+    {
+      id: 'welcome',
+      role: 'model',
+      text: "Hello! I'm your AI log assistant. How can I help you analyze these logs?"
     }
   ]);
   const [isLoading, setIsLoading] = useState(false);
@@ -283,30 +369,28 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, visib
         role: 'user',
         parts: [{ text: `
 System Instruction: 
-You are an expert log analyst. Your goal is to help the user understand their application logs.
+You are an expert log analyst and debugging assistant. Your goal is to help the user understand and solve issues in their application logs.
 
 BEHAVIOR RULES:
-1. **Analyze First**: Always use the \`search_logs\` tool to find relevant information before answering. Do not guess.
-2. **Expand Search**: When searching, generate SYNONYMS and RELATED TERMS.
-   - User: "Why is the charger failing?"
-   - You: Search for ["charger", "charging", "voltage", "current", "battery", "power"] with mode "OR".
-3. **Strict Formatting**: 
-   - When referring to a specific log line, YOU MUST use the format: [Log ID: <number>]. This creates a clickable link.
-   - Example: "The error started at [Log ID: 450] and cascaded to [Log ID: 455]."
-4. **ALWAYS RESPOND**: After executing a tool (like \`scroll_to_log\` or \`update_filters\`), you MUST provide a text response explaining what you did. Never return an empty response.
-5. **New Tabs**: If the user asks to filter the view (e.g., "show me only errors"), use \`update_filters\`. This will create a NEW tab. Tell the user you have opened a new tab with their requested data.
+1. **Analyze First**: Always use the \`search_logs\`, \`find_log_patterns\`, or \`trace_error_origin\` tools to find relevant information before answering. Do not guess.
+2. **Expand Search**: When searching, generate SYNONYMS and RELATED TERMS. For example, if asked about charging, search for "charger", "battery", "voltage", etc.
+3. **Be Proactive**: If you find an error, use \`suggest_solution\` to offer debugging steps.
+4. **Strict Formatting**: When referring to a specific log line, YOU MUST use the format: [Log ID: <number>]. This creates a clickable link.
+5. **ALWAYS RESPOND**: After executing a tool (like \`scroll_to_log\`), you MUST provide a text response explaining what you did. Never return an empty response.
+6. **New Tabs**: If the user asks to filter the view (e.g., "show me only errors"), use \`update_filters\`. This will create a NEW tab.
 
 RESPONSE STYLE:
-- **Interpret, Don't Just List**: Provide a narrative summary of events. Explain the context behind the logs rather than just reading them out.
-- **Be Conversational**: Write naturally. Use paragraphs and bullet points for readability. Avoid being overly brief or robotic.
+- **Interpret, Don't Just List**: Provide a narrative summary of events. Explain the context behind the logs.
+- **Be Conversational**: Write naturally. Use paragraphs and bullet points for readability.
 - **Cite Evidence**: Weave [Log ID: <id>] references into your sentences as proof for your analysis.
 
 Available Tools:
 - \`search_logs\`: Search the ENTIRE log file. Use 'OR' mode for synonyms.
 - \`scroll_to_log\`: Jump the user's view to a specific line.
 - \`update_filters\`: Create a NEW tab with specific filters.
-
-When you find a "smoking gun" or root cause log, use \`scroll_to_log\` to show it to the user immediately.
+- \`find_log_patterns\`: Find repeating errors or unusual log frequency spikes.
+- \`trace_error_origin\`: Trace events backwards from an error to find its root cause.
+- \`suggest_solution\`: Get debugging advice for a specific error message.
 ` }]
   });
 
@@ -315,51 +399,31 @@ System Instruction:
 You are an expert log analyst. Your goal is to help the user understand their application logs by using the tools available to you.
 
 TOOL USAGE RULES:
-1.  **Analyze First**: Always use the \`search_logs\` tool to find relevant information before answering. Do not guess.
+1.  **Analyze First**: Always use a tool like \`search_logs\` to find information before answering.
 2.  **How to Use Tools**: To use a tool, you MUST respond with ONLY a valid JSON object in the following format. Do not add any other text before or after the JSON.
     \`\`\`json
     {
       "tool_name": "name_of_the_tool",
-      "arguments": {
-        "arg1": "value1",
-        "arg2": ["value2"]
-      }
+      "arguments": { "arg1": "value1" }
     }
     \`\`\`
 3.  **Strict Formatting**: When referring to a specific log line in your final text answer, YOU MUST use the format: [Log ID: <number>].
 4.  **Final Answer**: After you have gathered enough information from the tools, provide a final, conversational answer in plain text. Do NOT use the JSON format for your final answer.
 
-RESPONSE STYLE (for final answers):
--   **Interpret, Don't Just List**: Provide a narrative summary of events.
--   **Be Conversational**: Write naturally.
--   **Cite Evidence**: Weave [Log ID: <id>] references into your sentences.
-
 Available Tools:
--   \`search_logs\`: Search the ENTIRE log file. Arguments: \`{"keywords": ["term1", "term2"], "match_mode": "OR"|"AND", "limit": 50}\`
+-   \`search_logs\`: Search the ENTIRE log file. Arguments: \`{"keywords": ["term1"], "match_mode": "OR"|"AND"}\`
 -   \`scroll_to_log\`: Jump the user's view to a specific line. Arguments: \`{"log_id": 123}\`
--   \`update_filters\`: Create a NEW tab with specific filters. Arguments: \`{"log_levels": ["ERROR"], "daemons": ["httpd"]}\`
-
-Example Interaction:
-User: "show me httpd errors"
-You:
-\`\`\`json
-{
-  "tool_name": "update_filters",
-  "arguments": {
-    "daemons": ["httpd"],
-    "log_levels": ["ERROR"]
-  }
-}
-\`\`\`
-(The system will execute this and return a confirmation message. Then you provide the final text answer.)
-You: I have opened a new tab showing all "ERROR" level logs from the "httpd" daemon.
+-   \`update_filters\`: Create a NEW tab with specific filters. Arguments: \`{"log_levels": ["ERROR"]}\`
+-   \`find_log_patterns\`: Find repeating errors or log spikes. Arguments: \`{"pattern_type": "repeating_error"|"frequency_spike"}\`
+-   \`trace_error_origin\`: Find the root cause of an error. Arguments: \`{"error_log_id": 123}\`
+-   \`suggest_solution\`: Get debugging advice. Arguments: \`{"error_message": "the error text"}\`
 `;
 
   const chatHistoryRef = useRef<Content[]>([
     getCloudSystemInstruction() as Content,
     {
         role: 'model',
-        parts: [{ text: "Understood. I will analyze logs using tools, strict [Log ID: <id>] formatting, and synonym-based search. I will provide conversational, interpretive responses while citing evidence." }]
+        parts: [{ text: "Understood. I will act as an expert log analyst, using all available tools to proactively find, analyze, and suggest solutions for issues, always citing log IDs and communicating in a clear, conversational manner." }]
     }
   ]);
 
@@ -381,7 +445,7 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
         getCloudSystemInstruction() as Content,
         {
             role: 'model',
-            parts: [{ text: "Understood. I will analyze logs using tools, strict [Log ID: <id>] formatting, and synonym-based search. I will provide conversational, interpretive responses while citing evidence." }]
+            parts: [{ text: "Understood. I will act as an expert log analyst, using all available tools to proactively find, analyze, and suggest solutions for issues, always citing log IDs and communicating in a clear, conversational manner." }]
         }
       ];
   };
@@ -410,7 +474,7 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
   };
 
   // Helper to execute client-side tools
-  const executeTool = (name: string, args: any): any => {
+  const executeTool = useCallback(async (name: string, args: any): Promise<any> => {
     console.log(`[AI] Executing tool: ${name}`, args);
 
     if (name === 'update_filters') {
@@ -459,11 +523,9 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
         
         if (keywords.length === 0) return { result: "Empty query." };
 
-        // Step 1: Frequency Analysis
         const keywordCounts: Record<string, number> = {};
         keywords.forEach(k => keywordCounts[k] = 0);
 
-        // Pre-scan to build counts
         for (const log of allLogs) {
              const text = (log.message + " " + log.daemon + " " + log.level + " " + log.timestamp.toISOString()).toLowerCase();
              for (const k of keywords) {
@@ -473,17 +535,12 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
              }
         }
 
-        // Step 2: Calculate Relevance Weights
         const keywordWeights: Record<string, number> = {};
         keywords.forEach(k => {
-            keywordWeights[k] = 1000 / (keywordCounts[k] + 1); // Normalized scale
+            keywordWeights[k] = 1000 / (keywordCounts[k] + 1);
         });
 
-        // Step 3: Score Logs
-        interface ScoredLog {
-            log: LogEntry;
-            score: number;
-        }
+        interface ScoredLog { log: LogEntry; score: number; }
         const scoredMatches: ScoredLog[] = [];
 
         for (const log of allLogs) {
@@ -497,41 +554,129 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
                     matchedCount++;
                 }
             }
-
             const isMatch = matchMode === 'AND' ? matchedCount === keywords.length : matchedCount > 0;
-            
-            if (isMatch) {
-                scoredMatches.push({ log, score: logScore });
-            }
+            if (isMatch) scoredMatches.push({ log, score: logScore });
         }
 
-        // Step 4: Sort by Score (Descending) and Limit
         scoredMatches.sort((a, b) => b.score - a.score);
         const topMatches = scoredMatches.slice(0, limit).map(m => m.log);
 
-        console.log(`[AI] Weighted Search [${keywords.join(', ')}]. Found ${scoredMatches.length}. Showing top ${topMatches.length}.`);
-
-        if (topMatches.length === 0) {
-            return { result: `No logs found matching terms: [${keywords.join(', ')}] with mode ${matchMode}.` };
-        }
-
+        if (topMatches.length === 0) return { result: `No logs found matching terms: [${keywords.join(', ')}] with mode ${matchMode}.` };
         return {
-            count: topMatches.length,
-            total_logs_searched: allLogs.length,
-            total_matches_found: scoredMatches.length,
-            note: `Showing top ${limit} most relevant matches. Results prioritized by keyword rarity (rare terms rank higher).`,
-            logs: topMatches.map(l => ({
-                id: l.id,
-                timestamp: l.timestamp.toISOString(),
-                level: l.level,
-                daemon: l.daemon,
-                message: l.message
-            }))
+            logs: topMatches.map(l => ({ id: l.id, timestamp: l.timestamp.toISOString(), level: l.level, daemon: l.daemon, message: l.message }))
         };
     }
+    else if (name === 'find_log_patterns') {
+        const { pattern_type, time_window_minutes } = args;
+        const now = allLogs.length > 0 ? allLogs[allLogs.length - 1].timestamp.getTime() : Date.now();
+        const startTime = time_window_minutes ? now - time_window_minutes * 60 * 1000 : 0;
+        
+        const logsInWindow = allLogs.filter(log => log.timestamp.getTime() >= startTime);
 
+        if (pattern_type === 'repeating_error') {
+            const errorCounts = new Map<string, { count: number; log: LogEntry }>();
+            logsInWindow
+                .filter(log => log.level === 'ERROR' || log.level === 'CRITICAL')
+                .forEach(log => {
+                    const existing = errorCounts.get(log.message);
+                    if (existing) {
+                        existing.count++;
+                    } else {
+                        errorCounts.set(log.message, { count: 1, log });
+                    }
+                });
+
+            const sortedErrors = Array.from(errorCounts.values()).sort((a, b) => b.count - a.count).slice(0, 5);
+            if (sortedErrors.length === 0) return { result: "No repeating errors found in the specified time window." };
+            return {
+                result: `Found ${sortedErrors.length} unique repeating errors.`,
+                top_repeating_errors: sortedErrors.map(e => ({ message: e.log.message, count: e.count, example_log_id: e.log.id })),
+            };
+        }
+        
+        if (pattern_type === 'frequency_spike') {
+            const buckets = new Map<number, number>();
+            logsInWindow.forEach(log => {
+                const bucketTimestamp = Math.floor(log.timestamp.getTime() / 1000); // per second
+                buckets.set(bucketTimestamp, (buckets.get(bucketTimestamp) || 0) + 1);
+            });
+
+            if (buckets.size === 0) return { result: "No logs to analyze for spikes." };
+
+            const counts = Array.from(buckets.values());
+            const avg = counts.reduce((sum, count) => sum + count, 0) / counts.length;
+            const stdDev = Math.sqrt(counts.map(x => Math.pow(x - avg, 2)).reduce((a, b) => a + b) / counts.length);
+            const spikeThreshold = Math.max(5, avg + 2 * stdDev);
+
+            const spikes = Array.from(buckets.entries())
+                .filter(([, count]) => count > spikeThreshold)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([timestamp, count]) => ({
+                    timestamp: new Date(timestamp * 1000).toISOString(),
+                    log_count: count,
+                    average_logs_per_second: avg.toFixed(2)
+                }));
+            
+            if (spikes.length === 0) return { result: `No significant log spikes found. Average was ${avg.toFixed(2)} logs/sec.` };
+            return { result: `Found ${spikes.length} significant log spikes.`, spikes };
+        }
+        return { error: `Unknown pattern_type: ${pattern_type}` };
+    }
+    else if (name === 'trace_error_origin') {
+        const { error_log_id, trace_window_seconds = 60 } = args;
+        const errorLog = allLogs.find(log => log.id === error_log_id);
+        if (!errorLog) return { error: `Log with ID ${error_log_id} not found.` };
+
+        const endTime = errorLog.timestamp.getTime();
+        const startTime = endTime - trace_window_seconds * 1000;
+        
+        const traceLogs = allLogs.filter(log => {
+            const logTime = log.timestamp.getTime();
+            return logTime >= startTime && logTime <= endTime;
+        });
+        return {
+            result: `Found ${traceLogs.length} logs in the ${trace_window_seconds} seconds leading up to log ${error_log_id}.`,
+            logs: traceLogs.map(l => ({ id: l.id, timestamp: l.timestamp.toISOString(), level: l.level, daemon: l.daemon, message: l.message }))
+        };
+    }
+    else if (name === 'suggest_solution') {
+        const { error_message } = args;
+        if (!error_message) return { error: "No error message provided." };
+        
+        const effectiveApiKey = import.meta.env.VITE_API_KEY || userApiKey;
+        const isLocal = modelTier.startsWith('local') || modelTier.startsWith('webllm');
+        
+        if (!isLocal && !effectiveApiKey) return { error: "Cannot suggest solution without API key." };
+
+        try {
+            const solutionPrompt = `You are a senior software engineer providing a brief, helpful, and actionable solution for a specific error message. Do not reference the user or the chat history. Focus only on the error. Use markdown for code snippets or commands if applicable. The error is: "${error_message}"`;
+            let solutionText = "";
+
+            if (isLocal) {
+                if (modelTier === 'local' && window.ai?.languageModel) {
+                    const session = await window.ai.languageModel.create();
+                    solutionText = await session.prompt(solutionPrompt);
+                    session.destroy();
+                } else if (modelTier === 'webllm' && webLlmEngineRef.current) {
+                    const reply = await webLlmEngineRef.current.chat.completions.create({ messages: [{ role: "user", content: solutionPrompt }] });
+                    solutionText = reply.choices[0].message.content || "Could not generate a solution.";
+                } else {
+                    solutionText = "Local AI is not available to suggest a solution.";
+                }
+            } else {
+                const ai = new GoogleGenAI({ apiKey: effectiveApiKey });
+                const result = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: [{ role: 'user', parts: [{ text: solutionPrompt }] }] });
+                solutionText = result.text || "Could not generate a solution.";
+            }
+            return { result: "Here is a potential solution:", solution: solutionText };
+        } catch (e) {
+            console.error("Error in suggest_solution tool:", e);
+            return { error: "An error occurred while trying to generate a solution." };
+        }
+    }
     return { error: `Unknown tool: ${name}` };
-  };
+  }, [allLogs, onUpdateFilters, onScrollToLog, modelTier, userApiKey]);
 
   const processLocalAI = async (userText: string) => {
       setIsLoading(true);
@@ -539,7 +684,7 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
       localHistory.push({ role: 'user', content: userText });
       
       let turnCount = 0;
-      const MAX_TURNS = 5; // Keep loops short for less capable models
+      const MAX_TURNS = 10;
 
       try {
           if (!window.ai?.languageModel) {
@@ -557,26 +702,19 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
           while (turnCount < MAX_TURNS) {
               turnCount++;
 
-              // Build a single prompt string including system instructions and history
               const fullPrompt = getLocalSystemInstruction() + '\n\n--- CHAT HISTORY ---\n\n' +
                                  localHistory.map(msg => `${msg.role.toUpperCase()}:\n${msg.content}`).join('\n\n');
 
               const replyText = await session.prompt(fullPrompt);
-
-              const trimmedReply = replyText.trim();
-              if (trimmedReply.startsWith('{') && trimmedReply.endsWith('}')) {
-                  try {
-                      const toolCall = JSON.parse(trimmedReply);
-                      if (toolCall.tool_name && toolCall.arguments) {
-                           localHistory.push({ role: 'model', content: trimmedReply });
-                           const toolResult = executeTool(toolCall.tool_name, toolCall.arguments);
-                           localHistory.push({ role: 'tool', content: JSON.stringify(toolResult, null, 2) });
-                           continue;
-                      }
-                  } catch (e) { /* Not valid JSON, treat as final answer */ }
+              const toolCall = parseLocalToolCall(replyText);
+              
+              if (toolCall) {
+                  localHistory.push({ role: 'model', content: replyText });
+                  const toolResult = await executeTool(toolCall.tool_name, toolCall.arguments);
+                  localHistory.push({ role: 'tool', content: JSON.stringify(toolResult, null, 2) });
+                  continue;
               }
 
-              // Not a tool call, this is the final answer.
               setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: replyText + "\n\n*(Generated locally on-device)*" }]);
               session.destroy();
               return;
@@ -606,7 +744,7 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
       ];
 
       let turnCount = 0;
-      const MAX_TURNS = 5;
+      const MAX_TURNS = 10;
 
       try {
           if (!webLlmEngineRef.current) {
@@ -628,18 +766,13 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
                });
 
                const replyText = reply.choices[0].message.content || "";
+               const toolCall = parseLocalToolCall(replyText);
                
-               const trimmedReply = replyText.trim();
-               if (trimmedReply.startsWith('{') && trimmedReply.endsWith('}')) {
-                  try {
-                      const toolCall = JSON.parse(trimmedReply);
-                      if (toolCall.tool_name && toolCall.arguments) {
-                          webLlmHistory.push({ role: 'assistant', content: trimmedReply });
-                          const toolResult = executeTool(toolCall.tool_name, toolCall.arguments);
-                          webLlmHistory.push({ role: 'tool', content: JSON.stringify(toolResult, null, 2) });
-                          continue;
-                      }
-                  } catch (e) { /* Not valid JSON, treat as final answer */ }
+               if (toolCall) {
+                  webLlmHistory.push({ role: 'assistant', content: replyText });
+                  const toolResult = await executeTool(toolCall.tool_name, toolCall.arguments);
+                  webLlmHistory.push({ role: 'tool', content: JSON.stringify(toolResult, null, 2) });
+                  continue;
                }
                
                setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: replyText + "\n\n*(Generated locally via WebLLM)*" }]);
@@ -707,7 +840,7 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
       setMessages(prev => [...prev, { 
           id: Date.now().toString(), 
           role: 'model', 
-          text: 'Error: API Key is missing. Please click the Settings icon (⚙️) above to enter your Google Gemini API Key.', 
+          text: "Error: API Key is missing. Please click the Settings icon (⚙️) to enter your key. You can get one from [Google AI Studio](https://aistudio.google.com/api-keys).", 
           isError: true 
       }]);
       setIsSettingsOpen(true);
@@ -737,7 +870,7 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
             model: modelName,
             contents: chatHistoryRef.current,
             config: {
-                tools: [{ functionDeclarations: [updateFiltersTool, scrollToLogTool, searchLogsTool] }],
+                tools: [{ functionDeclarations: [updateFiltersTool, scrollToLogTool, searchLogsTool, findLogPatternsTool, traceErrorOriginTool, suggestSolutionTool] }],
             },
         });
 
@@ -752,7 +885,7 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
              const toolResponses: Part[] = [];
 
              for (const call of functionCalls) {
-                 const toolResult = executeTool(call.name, call.args);
+                 const toolResult = await executeTool(call.name, call.args);
                  toolResponses.push({
                      functionResponse: {
                          name: call.name,
@@ -842,7 +975,7 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
       }
   };
 
-  const handleQuickAction = (action: 'summarize' | 'errors') => {
+  const handleQuickAction = (action: 'summarize' | 'errors' | 'solution' | 'capabilities') => {
     if (isLoading) return;
     
     let prompt = "";
@@ -850,6 +983,10 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
       prompt = "Summarize the key events by searching the entire log file.";
     } else if (action === 'errors') {
       prompt = "Find critical failures in the entire log file and explain the root cause.";
+    } else if (action === 'solution') {
+      prompt = "Find the most critical error in the entire log file and then provide a detailed solution for it.";
+    } else if (action === 'capabilities') {
+      prompt = "Explain your capabilities as an expert log analyst assistant. Describe the tools you have available and provide a clear, user-friendly example for each one in a markdown list format. Frame it as if you are introducing yourself.";
     }
 
     setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', text: prompt }]);
@@ -911,19 +1048,39 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
       <div className="p-3 grid grid-cols-2 gap-2 border-b border-gray-700 bg-gray-800/50">
         <button 
             onClick={() => handleQuickAction('summarize')}
-            disabled={isLoading || visibleLogs.length === 0}
+            disabled={isLoading}
             className="flex items-center justify-center space-x-1 bg-gray-700 hover:bg-gray-600 text-gray-200 py-2 px-3 rounded text-xs font-medium transition-colors disabled:opacity-50"
+            title="Ask AI to search all logs and provide a summary of key events."
         >
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 011.414.586l5.414 5.414a2 2 0 01.586 1.414V19a2 2 0 01-2 2z"></path></svg>
-            <span>Summarize View</span>
+            <span>Summarize</span>
         </button>
         <button 
             onClick={() => handleQuickAction('errors')}
             disabled={isLoading}
             className="flex items-center justify-center space-x-1 bg-gray-700 hover:bg-gray-600 text-gray-200 py-2 px-3 rounded text-xs font-medium transition-colors disabled:opacity-50"
+            title="Ask AI to search all logs for errors and analyze the root cause."
         >
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
             <span>Analyze Errors</span>
+        </button>
+         <button 
+            onClick={() => handleQuickAction('solution')}
+            disabled={isLoading}
+            className="flex items-center justify-center space-x-1 bg-gray-700 hover:bg-gray-600 text-gray-200 py-2 px-3 rounded text-xs font-medium transition-colors disabled:opacity-50"
+            title="Ask AI to find the most critical error and suggest a solution for it."
+        >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+            <span>Suggest Solution</span>
+        </button>
+        <button 
+            onClick={() => handleQuickAction('capabilities')}
+            disabled={isLoading}
+            className="flex items-center justify-center space-x-1 bg-gray-700 hover:bg-gray-600 text-gray-200 py-2 px-3 rounded text-xs font-medium transition-colors disabled:opacity-50"
+            title="Learn what the AI assistant can do."
+        >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+            <span>Capabilities</span>
         </button>
       </div>
 
@@ -1038,6 +1195,12 @@ You: I have opened a new tab showing all "ERROR" level logs from the "httpd" dae
                         <p className="text-[10px] text-gray-500 mt-1">
                             Your key is stored locally in your browser and used only for AI requests. 
                             If you have set a VITE_API_KEY environment variable, it will be prioritized over this one.
+                        </p>
+                         <p className="text-[10px] text-gray-500 mt-2">
+                          Don't have a key? Get one from{' '}
+                          <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
+                            Google AI Studio
+                          </a>.
                         </p>
                     </div>
                 </div>

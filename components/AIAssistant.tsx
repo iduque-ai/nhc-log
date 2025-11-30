@@ -1,8 +1,15 @@
 // FIX: Imported `useMemo` from React to resolve reference error.
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { GoogleGenAI, Type, FunctionDeclaration, Content, Part, GenerateContentResponse } from "@google/genai";
+import { GoogleGenAI, Type, FunctionDeclaration, Content, Part } from "@google/genai";
 import { CreateMLCEngine } from "@mlc-ai/web-llm";
 import { LogEntry, FilterState } from '../types.ts';
+
+// FIX: Local definition to solve import issue with GenerateContentResponse
+interface GenerateContentResponse {
+  text: string | undefined;
+  functionCalls?: { name: string; args: any; }[];
+  candidates?: { content?: Content }[];
+}
 
 interface AIAssistantProps {
   isOpen: boolean;
@@ -377,1097 +384,574 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, visib
       localStorage.setItem('nhc_log_viewer_api_key', tempApiKey.trim());
       setUserApiKey(tempApiKey.trim());
       setIsSettingsOpen(false);
-
-      // After saving a key, check if the last action failed due to a missing key and retry it.
-      const lastMessage = messages[messages.length - 1];
-      if (lastMessage?.isError && lastMessage.text.includes('API Key is missing')) {
-          const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
-          if (lastUserMessage) {
-              // Remove the error message from the UI before retrying
-              setMessages(prev => prev.filter(m => m.id !== lastMessage.id));
-              // Re-process the user's message with the new key
-              processUserMessage(lastUserMessage.text);
-          }
-      }
   };
-
-  // Ref to hold the WebLLM engine instance to avoid re-init
-  const webLlmEngineRef = useRef<any>(null);
-
-  const logFileContext = useMemo(() => {
-    if (allLogs.length === 0) return "CONTEXT: No logs have been loaded.";
-
-    const startTime = allLogs[0]?.timestamp.toISOString() || 'N/A';
-    const endTime = allLogs[allLogs.length - 1]?.timestamp.toISOString() || 'N/A';
-    
-    const levelCounts = allLogs.reduce((acc, log) => {
-        acc[log.level] = (acc[log.level] || 0) + 1;
-        return acc;
-    }, {} as Record<string, number>);
-
-    const levelSummary = Object.entries(levelCounts)
-        .map(([level, count]) => `${level}: ${count}`)
-        .join(', ');
-
-    return `
-LOG FILE CONTEXT:
-This is a summary of the entire log file you are analyzing. Use this information to inform your tool usage and analysis.
-- Total Logs: ${allLogs.length}
-- Time Range: ${startTime} to ${endTime}
-- Available Daemons: [${allDaemons.join(', ')}]
-- Log Level Distribution: ${levelSummary}
-`;
-  }, [allLogs, allDaemons]);
-
-  const getCloudSystemInstruction = useCallback((logContext: string) => ({
-        role: 'user' as const,
-        parts: [{ text: `
-System Instruction: 
-You are an expert log analyst and debugging assistant. Your goal is to help the user understand and solve issues in their application logs.
-
-${logContext}
-
-BEHAVIOR RULES:
-1. **Analyze First**: Always use the \`search_logs\`, \`find_log_patterns\`, or \`trace_error_origin\` tools to find relevant information before answering. Do not guess.
-2. **Expand Search**: When searching, generate SYNONYMS and RELATED TERMS. For example, if asked about charging, search for "charger", "battery", "voltage", etc.
-3. **Suggest Solutions on Request**: Only use the \`suggest_solution\` tool when the user explicitly asks for help or a solution.
-4. **Strict Formatting**: When referring to a specific log line, YOU MUST use the format: [Log ID: <number>]. This creates a clickable link.
-5. **ALWAYS RESPOND**: After executing a tool (like \`scroll_to_log\`), you MUST provide a text response explaining what you did. Never return an empty response.
-6. **New Tabs**: If the user asks to filter the view (e.g., "show me only errors"), use \`update_filters\`. This will create a NEW tab.
-
-MULTI-STEP ANALYSIS (TOOL CHAINING):
-- For complex questions (e.g., "find the root cause of the most common error"), you MUST break the problem down into sequential steps.
-- **Think Before Acting**: Before your first tool call, briefly outline your plan. This is part of your internal thought process to structure the analysis.
-- **Formulate a Plan**: For the example above, your plan should be:
-    1. First, I will call \`find_log_patterns\` to identify the most frequent error message.
-    2. Second, I will take the \`example_log_id\` returned by that tool.
-    3. Third, I will call \`trace_error_origin\` using that specific ID to find the events that led up to it.
-- **Execute Sequentially**: Use one tool, analyze the result you get back, then decide on the next tool. Do not call multiple tools at once.
-- **Synthesize**: After completing all steps in your plan, combine all your findings into a single, comprehensive final answer for the user. Do not simply list the tool results.
-- **Note**: The list of available tools may change based on the context. Use the tools you are provided in each turn.
-
-RESPONSE STYLE:
-- **Interpret, Don't Just List**: Provide a narrative summary of events. Explain the context behind the logs.
-- **Be Conversational**: Write naturally. Use paragraphs and bullet points for readability.
-- **Cite Evidence**: Weave [Log ID: <id>] references into your sentences as proof for your analysis.
-` }]
-  }), []);
-
-  const getLocalSystemInstruction = (state: ConversationState) => {
-    const availableTools = getAvailableTools(state);
-    const toolList = availableTools.map(t => `- \`${t.name}\`: ${t.description.split('.')[0]}. Arguments: \`${JSON.stringify(t.parameters?.properties || {})}\``).join('\n');
-
-    return `System Instruction:
-You are an expert log analyst. Your goal is to help the user understand their application logs by using the tools available to you.
-
-TOOL USAGE RULES:
-1.  **Analyze First**: Always use a tool like \`search_logs\` to find information before answering.
-2.  **How to Use Tools**: To use a tool, you MUST respond with ONLY a valid JSON object in the following format. Do not add any other text before or after the JSON.
-    \`\`\`json
-    {
-      "tool_name": "name_of_the_tool",
-      "arguments": { "arg1": "value1" }
-    }
-    \`\`\`
-3.  **Strict Formatting**: When referring to a specific log line in your final text answer, YOU MUST use the format: [Log ID: <number>].
-4.  **Final Answer**: After you have gathered enough information from the tools, provide a final, conversational answer in plain text. Do NOT use the JSON format for your final answer.
-
-MULTI-STEP ANALYSIS:
-- For complex questions, you must use tools sequentially to gather information before providing a final answer.
-- **Example Plan**: To answer "find the root cause of the most common error", your sequence of actions would be:
-    1. **Action 1**: Respond with JSON to call \`find_log_patterns\` with \`pattern_type: "repeating_error"\`.
-    2. **Get Result**: The system will provide you with the result, which includes an \`example_log_id\`.
-    3. **Action 2**: Respond with JSON to call \`trace_error_origin\` using the \`error_log_id\` you just received.
-    4. **Get Result**: The system provides the trace results.
-    5. **Final Answer**: Now that you have all the information, respond with a final answer in plain text, synthesizing the findings.
-
-Available Tools for this turn:
-${toolList}
-`;
-  };
-
-  const chatHistoryRef = useRef<Content[]>([]);
-
-  // This effect will initialize and update the chat history with the system prompt
+  
   useEffect(() => {
-    const systemInstruction = getCloudSystemInstruction(logFileContext) as Content;
-    const modelAck = {
-        role: 'model' as const,
-        parts: [{ text: "Understood. I will act as an expert log analyst, using all available tools to proactively find, analyze, and suggest solutions for issues, always citing log IDs and communicating in a clear, conversational manner." }]
-    };
-
-    if (chatHistoryRef.current.length === 0) {
-        // First time initialization
-        chatHistoryRef.current = [systemInstruction, modelAck];
-    } else {
-        // Update system prompt if context changes (e.g., more files added)
-        chatHistoryRef.current[0] = systemInstruction;
-    }
-  }, [logFileContext, getCloudSystemInstruction]);
-
-  const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  }, [messages, isLoading]);
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages, isOpen, downloadProgress]);
-
-  // Display saved findings when the panel opens for a recognized log source
-  useEffect(() => {
-    if (isOpen && savedFindings.length > 0) {
-        const alreadyShown = messages.some(m => m.id.startsWith('findings-'));
-        if (!alreadyShown) {
-            const findingsText = `**Welcome Back!** I recognize this log source. Here are your previously saved findings:\n\n` +
-                savedFindings.map((f, i) => `* **Finding ${i + 1}:** ${f.substring(0, 200)}${f.length > 200 ? '...' : ''}`).join('\n\n') +
-                "\n\nWould you like me to re-investigate any of these issues in the current logs?";
-
-            setMessages(prev => [
-                ...prev,
-                {
-                    id: `findings-${Date.now()}`,
-                    role: 'model',
-                    text: findingsText,
-                    isWarning: true,
-                }
-            ]);
-        }
-    }
-  }, [isOpen, savedFindings, messages]);
-
-  const handleResetChat = useCallback(() => {
-      setMessages([{ 
-          id: 'welcome', 
-          role: 'model', 
-          text: 'Chat history cleared. How can I help you analyze the logs?' 
-      }]);
-      chatHistoryRef.current = [
-        getCloudSystemInstruction(logFileContext) as Content,
-        {
-            role: 'model',
-            parts: [{ text: "Understood. I will act as an expert log analyst, using all available tools to proactively find, analyze, and suggest solutions for issues, always citing log IDs and communicating in a clear, conversational manner." }]
-        }
-      ];
-      conversationStateRef.current = 'IDLE';
-  }, [logFileContext, getCloudSystemInstruction]);
-
-  const handleWebLlmConsentAccept = () => {
-      localStorage.setItem(WEBLMM_CONSENT_KEY, 'true');
-      setShowWebLlmConsent(false);
-      if (pendingPrompt) {
-          setIsLoading(true);
-          processWebLLM(pendingPrompt);
-          setPendingPrompt(null);
-      }
-  };
-
-  const handleWebLlmConsentCancel = () => {
-      setShowWebLlmConsent(false);
-      setPendingPrompt(null);
-      // If the user cancels, remove their last message from the UI to avoid confusion.
-      const lastMessage = messages[messages.length - 1];
-      if(lastMessage && lastMessage.role === 'user') {
-        setMessages(prev => prev.slice(0, -1));
-      }
-      // Revert model selection to avoid getting stuck in a consent loop
-      setModelTier('gemini-2.5-flash'); 
-      setIsLoading(false);
-  };
-
-  // Helper to execute client-side tools
-  const executeTool = useCallback(async (name: string, args: any): Promise<any> => {
-    console.log(`[AI] Executing tool: ${name}`, args);
-
-    if (name === 'update_filters') {
-        const newFilters: Partial<FilterState> = {};
-        if (args.log_levels) newFilters.selectedLevels = args.log_levels.map((l: string) => l.toUpperCase());
-        if (args.daemons) newFilters.selectedDaemons = args.daemons;
-        
-        if (args.search_keywords) {
-            newFilters.keywordQueries = args.search_keywords.map((k: string) => {
-                const clean = k.trim();
-                if (!clean.startsWith('"') || !clean.endsWith('"')) {
-                    return `"${clean.replace(/"/g, '\\"')}"`;
-                }
-                return clean;
-            });
-        }
-        
-        if (args.keyword_match_mode) {
-             newFilters.keywordMatchMode = args.keyword_match_mode;
-        } else if (args.search_keywords && args.search_keywords.length > 0) {
-             newFilters.keywordMatchMode = 'OR';
-        }
-
-        onUpdateFilters(newFilters, args.reset_before_applying);
-        return { result: "A new tab has been created with the requested filters. The user is now looking at the new tab." };
-    } 
-    else if (name === 'scroll_to_log') {
-        const logId = Number(args.log_id);
-        if (!isNaN(logId)) {
-            onScrollToLog(logId);
-            return { result: `Success. User view has been scrolled to [Log ID: ${logId}].` };
-        }
-        return { error: "Invalid log ID provided." };
-    } 
-    else if (name === 'search_logs') {
-        let keywords: string[] = [];
-        if (args.keywords && Array.isArray(args.keywords)) {
-            keywords = args.keywords.map((k: string) => k.toLowerCase().trim());
-        } else if (args.query) {
-            keywords = args.query.split(/\s+/).map((k: string) => k.toLowerCase().trim());
-        }
-
-        const matchMode = args.match_mode || 'OR';
-        const limit = args.limit || 100;
-        
-        if (keywords.length === 0) return { summary: "Empty query.", logs_found: 0 };
-
-        const keywordCounts: Record<string, number> = {};
-        keywords.forEach(k => keywordCounts[k] = 0);
-
-        for (const log of allLogs) {
-             const text = (log.message + " " + log.daemon + " " + log.level + " " + log.timestamp.toISOString()).toLowerCase();
-             for (const k of keywords) {
-                 if (text.includes(k)) {
-                     keywordCounts[k]++;
-                 }
-             }
-        }
-
-        const keywordWeights: Record<string, number> = {};
-        keywords.forEach(k => {
-            keywordWeights[k] = 1000 / (keywordCounts[k] + 1);
-        });
-
-        interface ScoredLog { log: LogEntry; score: number; }
-        const scoredMatches: ScoredLog[] = [];
-
-        for (const log of allLogs) {
-            const text = (log.message + " " + log.daemon + " " + log.level + " " + log.timestamp.toISOString()).toLowerCase();
-            let logScore = 0;
-            let matchedCount = 0;
-
-            for (const k of keywords) {
-                if (text.includes(k)) {
-                    logScore += keywordWeights[k];
-                    matchedCount++;
-                }
-            }
-            const isMatch = matchMode === 'AND' ? matchedCount === keywords.length : matchedCount > 0;
-            if (isMatch) scoredMatches.push({ log, score: logScore });
-        }
-
-        scoredMatches.sort((a, b) => b.score - a.score);
-        const topMatches = scoredMatches.slice(0, limit).map(m => m.log);
-
-        if (topMatches.length === 0) {
-            return { summary: `No logs found matching terms: [${keywords.join(', ')}] with mode ${matchMode}.`, logs_found: 0 };
-        }
-
-        const levelCounts = topMatches.reduce((acc, log) => {
-            acc[log.level] = (acc[log.level] || 0) + 1;
-            return acc;
-        }, {} as Record<string, number>);
-
-        const levelSummary = Object.entries(levelCounts).map(([level, count]) => `${count} ${level}`).join(', ');
-
-        const exampleLogs = topMatches.slice(0, 3).map(l => ({
-            id: l.id,
-            timestamp: l.timestamp.toISOString(),
-            level: l.level,
-            daemon: l.daemon,
-            message: l.message
-        }));
-
-        return {
-            summary: `Found ${topMatches.length} logs. Breakdown: ${levelSummary}.`,
-            logs_found: topMatches.length,
-            example_logs: exampleLogs
-        };
-    }
-    else if (name === 'find_log_patterns') {
-        const { pattern_type, time_window_minutes } = args;
-        const now = allLogs.length > 0 ? allLogs[allLogs.length - 1].timestamp.getTime() : Date.now();
-        const startTime = time_window_minutes ? now - time_window_minutes * 60 * 1000 : 0;
-        
-        const logsInWindow = allLogs.filter(log => log.timestamp.getTime() >= startTime);
-
-        if (pattern_type === 'repeating_error') {
-            const errorCounts = new Map<string, { count: number; log: LogEntry }>();
-            logsInWindow
-                .filter(log => log.level === 'ERROR' || log.level === 'CRITICAL')
-                .forEach(log => {
-                    const existing = errorCounts.get(log.message);
-                    if (existing) {
-                        existing.count++;
-                    } else {
-                        errorCounts.set(log.message, { count: 1, log });
-                    }
-                });
-
-            const sortedErrors = Array.from(errorCounts.values()).sort((a, b) => b.count - a.count).slice(0, 5);
-            if (sortedErrors.length === 0) return { result: "No repeating errors found in the specified time window." };
-            return {
-                result: `Found ${sortedErrors.length} unique repeating errors.`,
-                top_repeating_errors: sortedErrors.map(e => ({ message: e.log.message, count: e.count, example_log_id: e.log.id })),
-            };
-        }
-        
-        if (pattern_type === 'frequency_spike') {
-            const buckets = new Map<number, number>();
-            logsInWindow.forEach(log => {
-                const bucketTimestamp = Math.floor(log.timestamp.getTime() / 1000); // per second
-                buckets.set(bucketTimestamp, (buckets.get(bucketTimestamp) || 0) + 1);
-            });
-
-            if (buckets.size === 0) return { result: "No logs to analyze for spikes." };
-
-            const counts = Array.from(buckets.values());
-            const avg = counts.reduce((sum, count) => sum + count, 0) / counts.length;
-            const stdDev = Math.sqrt(counts.map(x => Math.pow(x - avg, 2)).reduce((a, b) => a + b) / counts.length);
-            const spikeThreshold = Math.max(5, avg + 2 * stdDev);
-
-            const spikes = Array.from(buckets.entries())
-                .filter(([, count]) => count > spikeThreshold)
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 5)
-                .map(([timestamp, count]) => ({
-                    timestamp: new Date(timestamp * 1000).toISOString(),
-                    log_count: count,
-                    average_logs_per_second: avg.toFixed(2)
-                }));
-            
-            if (spikes.length === 0) return { result: `No significant log spikes found. Average was ${avg.toFixed(2)} logs/sec.` };
-            return { result: `Found ${spikes.length} significant log spikes.`, spikes };
-        }
-        return { error: `Unknown pattern_type: ${pattern_type}` };
-    }
-    else if (name === 'trace_error_origin') {
-        const { error_log_id, trace_window_seconds = 60 } = args;
-        const errorLog = allLogs.find(log => log.id === error_log_id);
-        if (!errorLog) return { error: `Log with ID ${error_log_id} not found.` };
-
-        const endTime = errorLog.timestamp.getTime();
-        const startTime = endTime - trace_window_seconds * 1000;
-        
-        const traceLogs = allLogs.filter(log => {
-            const logTime = log.timestamp.getTime();
-            return logTime >= startTime && logTime <= endTime;
-        });
-        
-        if (traceLogs.length === 0) return { summary: "No logs found in the trace window." };
-
-        const levelCounts = traceLogs.reduce((acc, log) => {
-            acc[log.level] = (acc[log.level] || 0) + 1;
-            return acc;
-        }, {} as Record<string, number>);
-        const levelSummary = Object.entries(levelCounts).map(([level, count]) => `${count} ${level}`).join(', ');
-
-        const recentTraceLogs = traceLogs.slice(-10).map(l => ({
-            id: l.id,
-            timestamp: l.timestamp.toISOString(),
-            level: l.level,
-            daemon: l.daemon,
-            message: l.message.substring(0, 150) + (l.message.length > 150 ? '...' : '')
-        }));
-
-        return {
-            summary: `Found ${traceLogs.length} logs in the ${trace_window_seconds}s leading up to log ${error_log_id}. Breakdown: ${levelSummary}.`,
-            trace_events: recentTraceLogs
-        };
-    }
-    else if (name === 'suggest_solution') {
-        const { error_message } = args;
-        if (!error_message) return { error: "No error message provided." };
-        
-        const effectiveApiKey = import.meta.env.VITE_API_KEY || userApiKey;
-        const isLocal = modelTier.startsWith('local') || modelTier.startsWith('webllm');
-        
-        if (!isLocal && !effectiveApiKey) return { error: "Cannot suggest solution without API key." };
-
-        try {
-            const solutionPrompt = `You are a senior software engineer providing a brief, helpful, and actionable solution for a specific error message. Do not reference the user or the chat history. Focus only on the error. Use markdown for code snippets or commands if applicable. The error is: "${error_message}"`;
-            let solutionText = "";
-
-            if (isLocal) {
-                if (modelTier === 'local' && window.ai?.languageModel) {
-                    const session = await window.ai.languageModel.create();
-                    solutionText = await session.prompt(solutionPrompt);
-                    session.destroy();
-                } else if (modelTier === 'webllm' && webLlmEngineRef.current) {
-                    const reply = await webLlmEngineRef.current.chat.completions.create({ messages: [{ role: "user", content: solutionPrompt }] });
-                    solutionText = reply.choices[0].message.content || "Could not generate a solution.";
-                } else {
-                    solutionText = "Local AI is not available to suggest a solution.";
-                }
-            } else {
-                const ai = new GoogleGenAI({ apiKey: effectiveApiKey });
-                const result: GenerateContentResponse = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: [{ role: 'user', parts: [{ text: solutionPrompt }] }] });
-                solutionText = result.text || "Could not generate a solution.";
-            }
-            return { result: "Here is a potential solution:", solution: solutionText };
-        } catch (e) {
-            console.error("Error in suggest_solution tool:", e);
-            return { error: "An error occurred while trying to generate a solution." };
-        }
-    }
-    return { error: `Unknown tool: ${name}` };
-  }, [allLogs, onUpdateFilters, onScrollToLog, modelTier, userApiKey]);
-
-  const processLocalAI = async (userText: string) => {
-      setIsLoading(true);
-      const localHistory: { role: 'user' | 'model' | 'tool'; content: string }[] = [];
-      localHistory.push({ role: 'user', content: userText });
+  const addMessage = useCallback((role: 'user' | 'model', text: string, isError: boolean = false) => {
+    setMessages(prev => [...prev, { id: Date.now().toString(), role, text, isError }]);
+  }, []);
+  
+  const handleToolCall = useCallback((toolName: string, args: any) => {
+    switch (toolName) {
+      case 'update_filters':
+        onUpdateFilters({
+          selectedLevels: args.log_levels,
+          selectedDaemons: args.daemons,
+          keywordQueries: args.search_keywords,
+          keywordMatchMode: args.keyword_match_mode || 'OR',
+        }, args.reset_before_applying ?? true);
+        return { success: true, message: `Created a new tab with the specified filters.` };
       
-      let turnCount = 0;
-      const MAX_TURNS = 10;
-      let currentState: ConversationState = 'IDLE';
+      case 'scroll_to_log':
+        onScrollToLog(args.log_id);
+        return { success: true, message: `Scrolled to log ID ${args.log_id}.` };
 
-      try {
-          if (!window.ai?.languageModel) {
-            throw new Error("Local AI (Gemini Nano) is not available in this browser. This feature requires the latest Chrome with the 'Prompt API for Gemini Nano' flag enabled.");
-          }
-          
-          setDownloadProgress("Checking local model availability...");
-          const capabilities = await window.ai.languageModel.capabilities();
-          if (capabilities.available === 'no') throw new Error("Local AI (Gemini Nano) is not supported by your device.");
-          if (capabilities.available === 'after-download') setDownloadProgress("Downloading Gemini Nano model...");
-
-          const session = await window.ai.languageModel.create({ outputLanguage: 'en' });
-          setDownloadProgress("");
-
-          while (turnCount < MAX_TURNS) {
-              turnCount++;
-              console.log(`[AI] Turn ${turnCount}/${MAX_TURNS} using Local AI (Nano) in state: ${currentState}`);
-
-              const fullPrompt = getLocalSystemInstruction(currentState) + '\n\n--- CHAT HISTORY ---\n\n' +
-                                 localHistory.map(msg => `${msg.role.toUpperCase()}:\n${msg.content}`).join('\n\n');
-
-              const replyText = await session.prompt(fullPrompt);
-              const toolCall = parseLocalToolCall(replyText);
-              
-              if (toolCall) {
-                  localHistory.push({ role: 'model', content: replyText });
-                  const toolResult = await executeTool(toolCall.tool_name, toolCall.arguments);
-                  
-                  if ((toolCall.tool_name === 'find_log_patterns' || toolCall.tool_name === 'search_logs') && (toolResult.logs_found > 0 || (toolResult.top_repeating_errors && toolResult.top_repeating_errors.length > 0))) {
-                      console.log("[AI State] Transitioning to ANALYZING after finding data.");
-                      currentState = 'ANALYZING';
-                  }
-
-                  localHistory.push({ role: 'tool', content: JSON.stringify(toolResult, null, 2) });
-                  continue;
-              }
-              
-              console.log("[AI State] Resetting to IDLE after final answer.");
-              setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: replyText + "\n\n*(Generated locally on-device)*" }]);
-              session.destroy();
-              return;
-          }
-
-          throw new Error("The local model could not complete the request in the allotted time.");
-
-      } catch (error: any) {
-          console.error("Local AI Error:", error);
-           setMessages(prev => [...prev, { 
-               id: Date.now().toString(), 
-               role: 'model', 
-               text: "Error running local model: " + (error.message || "Unknown error"), 
-               isError: true 
-           }]);
-      } finally {
-          setIsLoading(false);
-          setDownloadProgress("");
-      }
-  };
-
-  const processWebLLM = async (userText: string) => {
-      setIsLoading(true);
-      const webLlmHistory: any[] = [];
-      let currentState: ConversationState = 'IDLE';
-
-      let turnCount = 0;
-      const MAX_TURNS = 10;
-
-      try {
-          if (!webLlmEngineRef.current) {
-               setDownloadProgress("Initializing engine...");
-               webLlmEngineRef.current = await CreateMLCEngine(
-                   WEB_LLM_MODEL_ID,
-                   { initProgressCallback: (report) => setDownloadProgress(report.text) }
-               );
-          }
-          setDownloadProgress("");
-          
-          webLlmHistory.push({ role: 'user', content: userText });
-
-          while (turnCount < MAX_TURNS) {
-               turnCount++;
-               console.log(`[AI] Turn ${turnCount}/${MAX_TURNS} using WebLLM in state: ${currentState}`);
-               
-               const fullSystemPrompt = getLocalSystemInstruction(currentState);
-               const messagesForApi = [
-                   { role: "system", content: fullSystemPrompt },
-                   ...webLlmHistory
-               ];
-
-               const reply = await webLlmEngineRef.current.chat.completions.create({
-                   messages: messagesForApi,
-                   temperature: 0.5,
-                   max_tokens: 1024,
-               });
-
-               const replyText = reply.choices[0].message.content || "";
-               const toolCall = parseLocalToolCall(replyText);
-               
-               if (toolCall) {
-                  webLlmHistory.push({ role: 'assistant', content: replyText });
-                  const toolResult = await executeTool(toolCall.tool_name, toolCall.arguments);
-                  
-                  if ((toolCall.tool_name === 'find_log_patterns' || toolCall.tool_name === 'search_logs') && (toolResult.logs_found > 0 || (toolResult.top_repeating_errors && toolResult.top_repeating_errors.length > 0))) {
-                      console.log("[AI State] Transitioning to ANALYZING after finding data.");
-                      currentState = 'ANALYZING';
-                  }
-
-                  webLlmHistory.push({ role: 'tool', content: JSON.stringify(toolResult, null, 2) });
-                  continue;
-               }
-               
-               console.log("[AI State] Resetting to IDLE after final answer.");
-               setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: replyText + "\n\n*(Generated locally via WebLLM)*" }]);
-               return;
-          }
-
-          throw new Error("The local model could not complete the request in the allotted time.");
-
-      } catch (error: any) {
-          console.error("WebLLM Error:", error);
-          let errorMsg = "Error running WebLLM: " + (error.message || "Unknown error");
-          if (error.message?.includes("WebGPU")) {
-              errorMsg = "WebGPU is not supported or enabled in this browser. Please use Chrome/Edge and ensure hardware acceleration is on.";
-          } else if (error.message?.includes("Cache")) {
-              errorMsg = "Failed to download model. Please check your internet connection or firewall. (Cache Error)";
-          }
-          setMessages(prev => [...prev, { 
-              id: Date.now().toString(), 
-              role: 'model', 
-              text: errorMsg, 
-              isError: true 
-          }]);
-      } finally {
-          setIsLoading(false);
-          setDownloadProgress("");
-      }
-  };
-
-  const processUserMessage = async (userText: string) => {
-    // Handle Local Modes
-    if (modelTier === 'local') {
-        setIsLoading(true);
-        processLocalAI(userText);
-        return;
-    }
-    
-    if (modelTier === 'webllm') {
-        const hasConsented = localStorage.getItem(WEBLMM_CONSENT_KEY) === 'true';
-
-        if (!webLlmEngineRef.current && !hasConsented) {
-            setPendingPrompt(userText);
-            setShowWebLlmConsent(true);
-            return;
+      case 'search_logs': {
+        const { keywords, match_mode = 'OR', limit = 100 } = args;
+        if (!keywords || keywords.length === 0) {
+          return { logs: [], message: 'No keywords provided for search.' };
         }
         
-        setIsLoading(true);
-        processWebLLM(userText);
-        return;
+        const lowerCaseKeywords = keywords.map((k: string) => k.toLowerCase());
+        
+        const results = allLogs
+          .filter(log => {
+            const lowerCaseMessage = log.message.toLowerCase();
+            if (match_mode === 'AND') {
+              return lowerCaseKeywords.every((kw: string) => lowerCaseMessage.includes(kw));
+            } else { // OR
+              return lowerCaseKeywords.some((kw: string) => lowerCaseMessage.includes(kw));
+            }
+          })
+          .slice(0, limit)
+          .map(log => ({ id: log.id, timestamp: log.timestamp, level: log.level, message: log.message }));
+
+        return {
+          logs: results,
+          message: `Found ${results.length} logs matching [${keywords.join(', ')}].`
+        };
+      }
+      
+      case 'find_log_patterns': {
+        const { pattern_type, time_window_minutes } = args;
+        const targetLogs = time_window_minutes
+            ? allLogs.filter(log => {
+                const logTime = log.timestamp.getTime();
+                const endTime = allLogs[allLogs.length - 1].timestamp.getTime();
+                const startTime = endTime - time_window_minutes * 60 * 1000;
+                return logTime >= startTime && logTime <= endTime;
+              })
+            : allLogs;
+        
+        if (pattern_type === 'repeating_error') {
+            const errorCounts: Record<string, { count: number, firstId: number }> = {};
+            targetLogs.forEach(log => {
+                if (log.level === 'ERROR' || log.level === 'CRITICAL') {
+                    const genericMessage = log.message.replace(/\d+/g, 'N'); // Normalize numbers
+                    if (!errorCounts[genericMessage]) {
+                        errorCounts[genericMessage] = { count: 0, firstId: log.id };
+                    }
+                    errorCounts[genericMessage].count++;
+                }
+            });
+            const topErrors = Object.entries(errorCounts)
+                .sort((a, b) => b[1].count - a[1].count)
+                .slice(0, 5)
+                .map(([msg, data]) => ({ message: msg, count: data.count, example_log_id: data.firstId }));
+            return { patterns: topErrors, message: `Found ${topErrors.length} repeating error patterns.` };
+        }
+        // ... other pattern types
+        return { patterns: [], message: 'Pattern type not implemented yet.' };
+      }
+        
+      case 'trace_error_origin': {
+          const { error_log_id, trace_window_seconds = 60 } = args;
+          const errorLog = allLogs.find(l => l.id === error_log_id);
+          if (!errorLog) return { trace: [], message: `Log ID ${error_log_id} not found.` };
+          
+          const endTime = errorLog.timestamp.getTime();
+          const startTime = endTime - trace_window_seconds * 1000;
+          
+          const traceLogs = allLogs.filter(log => {
+             const logTime = log.timestamp.getTime();
+             return logTime >= startTime && logTime <= endTime;
+          }).map(log => ({ id: log.id, timestamp: log.timestamp, level: log.level, message: log.message }));
+          
+          return { trace: traceLogs, message: `Found ${traceLogs.length} logs in the ${trace_window_seconds}s before log ${error_log_id}.` };
+      }
+        
+      case 'suggest_solution':
+        // This is a placeholder. In a real scenario, this might call another API
+        // or have a predefined set of solutions. The model itself will generate the text.
+        return { success: true, message: `Providing solution for: "${args.error_message}"` };
+
+      default:
+        return { error: `Tool "${toolName}" not found.` };
     }
+  }, [allLogs, onUpdateFilters, onScrollToLog]);
 
-    // Show privacy warning on first cloud use
-    if (!cloudPrivacyWarningShown.current) {
-        setMessages(prev => [...prev, {
-            id: `privacy-warning-${Date.now()}`,
-            role: 'model',
-            text: '**Privacy Notice:** You are using a cloud-based AI model. To answer your questions, a summary of relevant logs will be sent to Google for analysis. For 100% on-device processing, please select a "Local" model from the dropdown menu.',
-            isWarning: true,
-        }]);
-        cloudPrivacyWarningShown.current = true;
-    }
-
-    const effectiveApiKey = import.meta.env.VITE_API_KEY || userApiKey;
-
-    if (!effectiveApiKey) {
-      setMessages(prev => [...prev, { 
-          id: Date.now().toString(), 
-          role: 'model', 
-          text: "Error: API Key is missing. Please click the Settings icon (⚙️) to enter your key. You can get one from [Google AI Studio](https://aistudio.google.com/api-keys).", 
-          isError: true 
-      }]);
-      setIsSettingsOpen(true);
+  const runCloudAI = useCallback(async (prompt: string) => {
+    const apiKey = userApiKey || import.meta.env.VITE_API_KEY;
+    if (!apiKey) {
+      addMessage('model', "API key is not configured. Please set one in the settings (⚙️).", true);
+      setIsLoading(false);
       return;
     }
+    
+    if (!cloudPrivacyWarningShown.current) {
+        addMessage('model', "You are using a cloud-based AI model. A summary of your log data will be sent to Google for analysis. For fully private, on-device analysis, you can switch to a local model in settings.", false);
+        cloudPrivacyWarningShown.current = true;
+    }
+    
+    const ai = new GoogleGenAI({ apiKey });
 
-    setIsLoading(true);
-    const historyStartIndex = chatHistoryRef.current.length;
+    const logSamples = visibleLogs.length > 5 ?
+        [...visibleLogs.slice(0, 3), ...visibleLogs.slice(-2)] :
+        visibleLogs;
 
-    try {
-      const ai = new GoogleGenAI({ apiKey: effectiveApiKey });
-      const modelName = modelTier;
-      
-      const userContent: Content = { role: 'user', parts: [{ text: userText }] };
-      chatHistoryRef.current = [...chatHistoryRef.current, userContent];
+    const sampleLogText = logSamples.map(l => `ID ${l.id}: ${l.timestamp.toISOString()} ${l.daemon} [${l.level}] ${l.message}`).join('\n');
+    
+    const systemPrompt = `You are an expert AI assistant embedded in a log analysis tool. Your primary goal is to help users understand their logs and identify problems.
 
-      let finalResponseText = '';
-      let turnCount = 0;
-      const MAX_TURNS = 10;
+# CONTEXT
+- You are analyzing a set of logs from a system.
+- Total logs in the current filtered view: ${visibleLogs.length.toLocaleString()}
+- Total logs across all files: ${allLogs.length.toLocaleString()}
+- Available Daemons: ${allDaemons.join(', ') || 'N/A'}
+- Time range of visible logs: ${visibleLogs.length > 0 ? new Date(visibleLogs[0].timestamp).toISOString() : 'N/A'} to ${visibleLogs.length > 0 ? new Date(visibleLogs[visibleLogs.length - 1].timestamp).toISOString() : 'N/A'}
 
-      while (turnCount < MAX_TURNS) {
-        turnCount++;
-        console.log(`[AI] Turn ${turnCount}/${MAX_TURNS} using ${modelName} in state: ${conversationStateRef.current}`);
-        
-        const availableTools = getAvailableTools(conversationStateRef.current);
-        
-        const result: GenerateContentResponse = await ai.models.generateContent({
-            model: modelName,
-            contents: chatHistoryRef.current,
-            config: {
-                tools: [{ functionDeclarations: availableTools }],
-            },
-        });
+# LOG SAMPLES (from current view)
+This is a sample of the logs you are analyzing to understand their structure. Do not limit your analysis to only these lines; use the 'search_logs' tool to get more data.
+\`\`\`
+${sampleLogText || 'No logs in current view.'}
+\`\`\`
 
-        const responseContent = result.candidates?.[0]?.content;
-        if (!responseContent) throw new Error("No content in response");
+# PREVIOUSLY IDENTIFIED FINDINGS
+The user has saved these findings from previous sessions. These might be relevant.
+${savedFindings.length > 0 ? savedFindings.map(f => `- ${f}`).join('\n') : 'None'}
 
-        chatHistoryRef.current.push(responseContent);
+# AVAILABLE TOOLS
+You have a set of tools to interact with the log viewer.
+- Use 'search_logs' to find specific log entries across ALL logs. This is powerful for finding related events outside the current view.
+- Use 'find_log_patterns' to identify trends like repeating errors or spikes in activity.
+- Use 'trace_error_origin' AFTER you have found a specific error log ID to see what happened before it.
+- Use 'update_filters' to create a new, focused view for the user. This helps them drill down into issues.
+- Use 'scroll_to_log' to highlight a specific log entry for the user.
+- Use 'suggest_solution' ONLY when asked for help fixing an error.
 
-        const functionCalls = result.functionCalls;
-        
-        if (functionCalls && functionCalls.length > 0) {
-             const toolResponses: Part[] = [];
+# RESPONSE GUIDELINES
+- Be concise and clear.
+- When you find a specific log, ALWAYS mention its ID using the format [Log ID: 123] so the user can click it.
+- Think step-by-step. First, understand the user's request. Second, decide which tool(s) to use. Third, analyze the tool output. Finally, formulate a user-facing response.
+- If a user's request is ambiguous, ask clarifying questions before using tools.
+- Do not invent information. If the logs don't contain the answer, say so.
+- When presenting findings, summarize them first, then provide supporting log IDs.
+- You can use markdown for formatting (bold, lists, code blocks).
+`;
 
-             for (const call of functionCalls) {
-                 const toolResult = await executeTool(call.name, call.args);
-                 
-                 if ((call.name === 'find_log_patterns' || call.name === 'search_logs') && (toolResult.logs_found > 0 || (toolResult.top_repeating_errors && toolResult.top_repeating_errors.length > 0))) {
-                     console.log("[AI State] Transitioning to ANALYZING after finding data.");
-                     conversationStateRef.current = 'ANALYZING';
-                 }
-
-                 toolResponses.push({
-                     functionResponse: {
-                         name: call.name,
-                         response: { result: toolResult }
-                     }
-                 });
-             }
-             chatHistoryRef.current.push({ role: 'user', parts: toolResponses });
-        } else {
-            finalResponseText = result.text ?? '';
-            console.log("[AI State] Resetting to IDLE after final answer.");
-            conversationStateRef.current = 'IDLE'; // Reset state after a final answer
-            break;
-        }
-      }
-
-      if (!finalResponseText && turnCount >= MAX_TURNS) {
-          console.warn("[AI] Max turns reached. Forcing summary.");
-          const summaryPrompt: Content = { 
-              role: 'user', 
-              parts: [{ text: "You have reached the maximum number of tool calls. Please stop searching and answer the user's question based on the information you have found so far. Summarize what you know." }] 
-          };
-          chatHistoryRef.current.push(summaryPrompt);
+    const history: Content[] = messages.slice(1) // Exclude welcome message
+      .flatMap(m => {
+          // Heuristic: Don't include error/warning messages in history to prevent confusion
+          if (m.isError || m.isWarning) return [];
           
-          const finalResult: GenerateContentResponse = await ai.models.generateContent({
-            model: modelName,
-            contents: chatHistoryRef.current,
-          });
-          
-          finalResponseText = finalResult.text || "I was unable to complete the analysis in the allotted time.";
-          chatHistoryRef.current.push(finalResult.candidates?.[0]?.content as Content);
-      }
-
-      if (finalResponseText) {
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: finalResponseText }]);
-      } else {
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: "I've completed the requested actions." }]);
-      }
-
-    } catch (error: any) {
-      console.error("AI Error:", error);
-      
-      chatHistoryRef.current = chatHistoryRef.current.slice(0, historyStartIndex);
-      conversationStateRef.current = 'IDLE'; // Reset state on error
-
-      let errorMessage = "I'm having trouble connecting to the AI right now.";
-      
-      if (typeof error === 'object' && error !== null) {
-          const msg = error.message || JSON.stringify(error);
-          if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
-              errorMessage = `The rate limit for the **${modelTier}** model was exceeded. Please wait a moment before trying again, or switch to a different model tier.`;
+          // Crude attempt to find tool calls/responses in past messages to reconstruct history.
+          // This is a simplified approach. A more robust solution would store the structured
+          // tool calls and responses separately in the message history state.
+          if (m.role === 'model' && m.text.startsWith('Tool Call:')) {
               try {
-                  const jsonMatch = msg.match(/{.*}/);
-                  if (jsonMatch) {
-                      const errorDetails = JSON.parse(jsonMatch[0]);
-                      const retryInfo = errorDetails.error?.details?.find((d: any) => d['@type']?.includes('RetryInfo'));
-                      if (retryInfo?.retryDelay) {
-                          const secondsMatch = retryInfo.retryDelay.match(/(\d+(\.\d+)?)/);
-                          if (secondsMatch) {
-                              const seconds = Math.ceil(parseFloat(secondsMatch[1]));
-                              errorMessage = `Rate limit for **${modelTier}** exceeded. Please try again in about ${seconds} seconds.`;
-                          }
-                      }
-                      const usageLinkMatch = msg.match(/https:\/\/ai\.dev\/usage\?tab=rate-limit/);
-                      if (usageLinkMatch) {
-                          errorMessage += `\n\nTo monitor your usage, visit: ${usageLinkMatch[0]}`;
-                      }
-                  }
-              } catch (e) {
-                  console.warn("Could not parse detailed rate limit error:", e);
+                  const callText = m.text.substring('Tool Call:'.length).trim();
+                  const call = JSON.parse(callText);
+                  return [{ role: 'model' as const, parts: [{ functionCall: call }] }];
+              } catch {
+                  return [{ role: 'model' as const, parts: [{ text: m.text }] }];
               }
           }
-          if (msg.includes('API_KEY')) {
-              errorMessage = "Invalid API Key. Please check settings.";
+          if (m.role === 'model' && m.text.startsWith('Tool Response:')) {
+              try {
+                  const responseText = m.text.substring('Tool Response:'.length).trim();
+                  const response = JSON.parse(responseText);
+                  return [{ role: 'tool' as const, parts: [{ functionResponse: response }] }];
+              } catch {
+                  return [{ role: 'model' as const, parts: [{ text: m.text }] }];
+              }
+          }
+
+          return [{
+              role: m.role,
+              parts: [{ text: m.text }],
+          }];
+      });
+
+    history.push({ role: 'user', parts: [{ text: prompt }] });
+    
+    const MAX_TURNS = 10;
+    for (let turn = 1; turn <= MAX_TURNS; turn++) {
+        const modelToUse = modelTier === 'gemini-3-pro-preview' ? 'gemini-3-pro-preview' : 'gemini-2.5-flash';
+        
+        console.log(`[AI] Turn ${turn}/${MAX_TURNS} using ${modelToUse} in state: ${conversationStateRef.current}`);
+
+        let response: GenerateContentResponse;
+        try {
+            response = await ai.models.generateContent({
+                model: modelToUse,
+                contents: history,
+                tools: [{ functionDeclarations: getAvailableTools(conversationStateRef.current) }],
+                systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+            });
+        } catch (e: any) {
+            console.error("Gemini API Error:", e);
+            if (e.message && (e.message.toLowerCase().includes('rate limit') || e.message.toLowerCase().includes('quota'))) {
+                 addMessage('model', `I've hit a rate limit while processing your request. This usually means too many requests were sent in a short period.\n\nPlease try again in a few moments. If the problem persists, you may need to check the usage limits on your Google AI API key.`, true);
+            } else {
+                 addMessage('model', `An error occurred while communicating with the AI model: ${e.message || 'Unknown error'}`, true);
+            }
+            setIsLoading(false);
+            return;
+        }
+
+        const functionCalls = response.functionCalls;
+
+        if (functionCalls && functionCalls.length > 0) {
+            history.push({ role: 'model', parts: [{ functionCall: functionCalls[0] }] });
+            const toolCall = functionCalls[0];
+            
+            console.log('[AI] Executing tool:', toolCall.name, toolCall.args);
+
+            const toolResponseParts: Part[] = [];
+
+            switch (toolCall.name) {
+                case 'update_filters': {
+                    const result = handleToolCall(toolCall.name, toolCall.args);
+                    toolResponseParts.push({ functionResponse: { name: 'update_filters', response: { result: JSON.stringify(result) } } });
+                    break;
+                }
+                case 'scroll_to_log': {
+                    const result = handleToolCall(toolCall.name, toolCall.args);
+                    toolResponseParts.push({ functionResponse: { name: 'scroll_to_log', response: { result: JSON.stringify(result) } } });
+                    break;
+                }
+                case 'search_logs': {
+                    const result = handleToolCall(toolCall.name, toolCall.args);
+                    if (result.logs.length > 0) {
+                        conversationStateRef.current = 'ANALYZING';
+                        console.log('[AI State] Transitioning to ANALYZING after finding data.');
+                    }
+                    toolResponseParts.push({ functionResponse: { name: 'search_logs', response: { result: JSON.stringify(result) } } });
+                    break;
+                }
+                case 'find_log_patterns': {
+                    const result = handleToolCall(toolCall.name, toolCall.args);
+                    toolResponseParts.push({ functionResponse: { name: 'find_log_patterns', response: { result: JSON.stringify(result) } } });
+                    break;
+                }
+                case 'trace_error_origin': {
+                    const result = handleToolCall(toolCall.name, toolCall.args);
+                    toolResponseParts.push({ functionResponse: { name: 'trace_error_origin', response: { result: JSON.stringify(result) } } });
+                    break;
+                }
+                 case 'suggest_solution': {
+                    const result = handleToolCall(toolCall.name, toolCall.args);
+                    toolResponseParts.push({ functionResponse: { name: 'suggest_solution', response: { result: JSON.stringify(result) } } });
+                    break;
+                }
+                default:
+                    toolResponseParts.push({ functionResponse: { name: toolCall.name, response: { error: `Tool "${toolCall.name}" is not supported.` } } });
+                    break;
+            }
+            history.push({ role: 'tool', parts: toolResponseParts });
+
+        } else if (response.text) {
+            const finalText = response.text;
+            addMessage('model', finalText);
+            conversationStateRef.current = 'IDLE';
+            console.log('[AI State] Resetting to IDLE after final answer.');
+            break; // Exit the tool-use loop
+        } else {
+            addMessage('model', "I received an unexpected response from the AI. Please try again.", true);
+            break;
+        }
+    }
+    setIsLoading(false);
+  }, [userApiKey, visibleLogs, allLogs, allDaemons, messages, modelTier, addMessage, handleToolCall, savedFindings]);
+  
+  const mlcEngine = useRef<any>(null);
+
+  const runLocalAI = useCallback(async (prompt: string) => {
+    if (!mlcEngine.current) {
+        addMessage('model', 'Local AI model is not loaded yet. Please wait.', true);
+        setIsLoading(false);
+        return;
+    }
+
+    const localSystemPrompt = `You are a helpful log analysis assistant.
+You can use tools by responding with a JSON object with 'tool_name' and 'arguments'.
+Available tools:
+- search_logs({keywords: string[], match_mode: 'OR'|'AND', limit: number}): Searches all logs.
+- find_log_patterns({pattern_type: 'repeating_error'|'frequency_spike', time_window_minutes?: number}): Finds common patterns.
+- update_filters({log_levels?: string[], daemons?: string[], search_keywords?: string[]}): Creates a new tab with filters.
+Example:
+To search for "error" and "database", you would respond with:
+\`\`\`json
+{"tool_name": "search_logs", "arguments": {"keywords": ["error", "database"], "match_mode": "AND"}}
+\`\`\`
+Analyze the user's request and respond with ONLY the JSON tool call. Do not add any other text.
+`;
+    
+    let fullResponse = '';
+    const MAX_TURNS = 5;
+    let currentPrompt = prompt;
+
+    for (let turn = 1; turn <= MAX_TURNS; turn++) {
+        const completion = await mlcEngine.current.chat.completions.create({
+            messages: [
+                { role: "system", content: localSystemPrompt },
+                { role: "user", content: currentPrompt },
+            ],
+            max_tokens: 512,
+            temperature: 0.1,
+        });
+        
+        const responseText = completion.choices[0].message.content || '';
+        const toolCall = parseLocalToolCall(responseText);
+        
+        if (toolCall) {
+            const result = handleToolCall(toolCall.tool_name, toolCall.arguments);
+            const resultString = JSON.stringify(result, null, 2);
+            currentPrompt = `I used the tool '${toolCall.tool_name}' with arguments ${JSON.stringify(toolCall.arguments)}. The result was: ${resultString}. Now, based on this result, what is the final answer to the user's original question: "${prompt}"? Provide a concise, user-facing summary. Do not call any more tools.`;
+            // In the last turn, we just append the result and let it fall through
+            if (turn === MAX_TURNS) {
+                fullResponse += `\nAfter analyzing the tool output, here is a summary:\n${resultString}`;
+            }
+        } else {
+            fullResponse = responseText;
+            break; // No tool call, so this is the final answer
+        }
+    }
+
+    addMessage('model', fullResponse || "I couldn't generate a response. Please try rephrasing.");
+    setIsLoading(false);
+
+  }, [addMessage, handleToolCall]);
+
+  const loadWebLlm = useCallback(async () => {
+    setIsLoading(true);
+    try {
+        const engine = await CreateMLCEngine(WEB_LLM_MODEL_ID, {
+            initProgressCallback: (progress) => {
+                setDownloadProgress(`Loading model: ${progress.text}`);
+            }
+        });
+        mlcEngine.current = engine;
+        setDownloadProgress('');
+        addMessage('model', 'Local AI model (Llama 3) loaded successfully! You can now use it for analysis.');
+        // If there was a prompt waiting, execute it now.
+        if (pendingPrompt) {
+            runLocalAI(pendingPrompt);
+            setPendingPrompt(null);
+        } else {
+            setIsLoading(false);
+        }
+    } catch (e: any) {
+        console.error("WebLLM Error:", e);
+        addMessage('model', `Failed to load the local AI model. Your device might not have enough memory or GPU support. Error: ${e.message}`, true);
+        setModelTier('gemini-2.5-flash'); // Fallback to cloud
+        setIsLoading(false);
+        setDownloadProgress('');
+    }
+  }, [addMessage, runLocalAI, pendingPrompt]);
+
+  const handleConsent = (consented: boolean) => {
+      setShowWebLlmConsent(false);
+      if (consented) {
+          localStorage.setItem(WEBLMM_CONSENT_KEY, 'true');
+          loadWebLlm();
+      } else {
+          setModelTier('gemini-2.5-flash'); // Revert if they decline
+          setIsLoading(false);
+          if (pendingPrompt) {
+              addMessage('model', 'Switched back to cloud model. Please send your request again.', false);
+              setPendingPrompt(null);
           }
       }
-      
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'model', text: errorMessage, isError: true }]);
-    } finally {
-      setIsLoading(false);
-    }
   };
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!input.trim() || isLoading) return;
+    const trimmedInput = input.trim();
+    if (!trimmedInput || isLoading) return;
 
-    const text = input;
-    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', text }]);
-    setInput('');
-    processUserMessage(text);
-  };
+    addMessage('user', trimmedInput);
+    setIsLoading(true);
 
-  const handleRetry = (errorMsgId: string) => {
-      if (isLoading) return;
-      
-      const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
-      
-      if (lastUserMsg) {
-          setMessages(prev => prev.filter(m => m.id !== errorMsgId));
-          processUserMessage(lastUserMsg.text);
+    if (modelTier === 'web-llm') {
+      if (mlcEngine.current) {
+        runLocalAI(trimmedInput);
+      } else {
+        setPendingPrompt(trimmedInput); // Save the prompt
+        const hasConsented = localStorage.getItem(WEBLMM_CONSENT_KEY) === 'true';
+        if (!hasConsented) {
+            setShowWebLlmConsent(true);
+        } else {
+            loadWebLlm();
+        }
       }
-  };
-
-  const handleQuickAction = (action: 'summarize' | 'errors' | 'solution' | 'capabilities') => {
-    if (isLoading) return;
-    
-    let prompt = "";
-    if (action === 'summarize') {
-      prompt = "Summarize the key events by searching the entire log file.";
-    } else if (action === 'errors') {
-      prompt = "Find critical failures in the entire log file and explain the root cause.";
-    } else if (action === 'solution') {
-      prompt = "Find the most critical error in the entire log file and then provide a detailed solution for it.";
-    } else if (action === 'capabilities') {
-      prompt = "Explain your capabilities as an expert log analyst assistant. Describe the tools you have available and provide a clear, user-friendly example for each one in a markdown list format. Frame it as if you are introducing yourself.";
+    } else {
+      runCloudAI(trimmedInput);
     }
-
-    setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', text: prompt }]);
-    processUserMessage(prompt);
+    setInput('');
   };
-
-  if (!isOpen) return null;
+  
+  const quickPrompts = [
+      "Summarize the most common errors.",
+      "Are there any unusual activity spikes?",
+      "Show me all logs related to 'database connection'.",
+      "What happened around log ID 1234?",
+  ];
 
   return (
-    <>
-    <div className="fixed inset-y-0 right-0 z-40 w-full md:w-96 bg-gray-800 shadow-2xl border-l border-gray-700 flex flex-col transform transition-transform duration-300 ease-in-out">
-      {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-gray-700 bg-gray-900">
-        <div className="flex items-center space-x-2">
-            <div className="bg-gradient-to-tr from-blue-500 to-purple-500 p-1.5 rounded-lg">
-                <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-            </div>
-            <div>
-                <h2 className="text-sm font-bold text-white leading-none">AI Assistant</h2>
-                <div className="flex items-center space-x-1 mt-1">
-                    <span className="text-[9px] text-gray-400">Model:</span>
-                    <select 
-                        value={modelTier} 
-                        onChange={(e) => setModelTier(e.target.value)}
-                        className="bg-gray-800 border border-gray-600 text-xs rounded px-1 py-0.5 text-blue-300 focus:outline-none focus:border-blue-500 cursor-pointer max-w-[140px]"
-                        disabled={isLoading}
-                    >
-                        <option value="gemini-flash-lite-latest">Fast</option>
-                        <option value="gemini-2.5-flash">Balanced</option>
-                        <option value="gemini-3-pro-preview">Reasoning</option>
-                        <option value="local">Local (Chrome Nano)</option>
-                        <option value="webllm">Local (WebLLM - Llama 3)</option>
-                    </select>
-                </div>
-            </div>
-        </div>
-        <div className="flex items-center space-x-1">
-            <button 
-                onClick={() => setIsSettingsOpen(true)}
-                className="text-gray-400 hover:text-white p-1 rounded-md hover:bg-gray-700"
-                title="Settings / API Key"
+    <div className={`absolute inset-0 bg-gray-900/50 backdrop-blur-sm z-40 transition-opacity ${isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+      <div className={`absolute top-0 right-0 h-full w-full max-w-lg bg-gray-800 border-l border-gray-700 shadow-2xl flex flex-col transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+        <div className="flex-shrink-0 flex items-center justify-between p-2 border-b border-gray-700">
+          <div className="flex items-center space-x-2">
+            <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+            <h2 className="font-bold text-sm text-white">AI Assistant</h2>
+          </div>
+          <div className="flex items-center space-x-1">
+            <button
+               onClick={() => setIsSettingsOpen(!isSettingsOpen)}
+               className="p-1 text-gray-400 hover:text-white rounded-md hover:bg-gray-700"
+               title="Settings"
             >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
             </button>
-             <button 
-                onClick={handleResetChat} 
-                className="text-gray-400 hover:text-red-400 p-1 rounded-md hover:bg-gray-700"
-                title="Reset Chat"
-            >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+            <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded-md hover:bg-gray-700" aria-label="Close AI Assistant">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
             </button>
-            <button onClick={onClose} className="text-gray-400 hover:text-white p-1 rounded-md hover:bg-gray-700">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-            </button>
+          </div>
         </div>
-      </div>
-      
-      {/* Quick Actions */}
-      <div className="p-3 grid grid-cols-2 gap-2 border-b border-gray-700 bg-gray-800/50">
-        <button 
-            onClick={() => handleQuickAction('summarize')}
-            disabled={isLoading}
-            className="flex items-center justify-center space-x-1 bg-gray-700 hover:bg-gray-600 text-gray-200 py-2 px-3 rounded text-xs font-medium transition-colors disabled:opacity-50"
-            title="Ask AI to search all logs and provide a summary of key events."
-        >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 011.414.586l5.414 5.414a2 2 0 01.586 1.414V19a2 2 0 01-2 2z"></path></svg>
-            <span>Summarize</span>
-        </button>
-        <button 
-            onClick={() => handleQuickAction('errors')}
-            disabled={isLoading}
-            className="flex items-center justify-center space-x-1 bg-gray-700 hover:bg-gray-600 text-gray-200 py-2 px-3 rounded text-xs font-medium transition-colors disabled:opacity-50"
-            title="Ask AI to search all logs for errors and analyze the root cause."
-        >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-            <span>Analyze Errors</span>
-        </button>
-         <button 
-            onClick={() => handleQuickAction('solution')}
-            disabled={isLoading}
-            className="flex items-center justify-center space-x-1 bg-gray-700 hover:bg-gray-600 text-gray-200 py-2 px-3 rounded text-xs font-medium transition-colors disabled:opacity-50"
-            title="Ask AI to find the most critical error and suggest a solution for it."
-        >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
-            <span>Suggest Solution</span>
-        </button>
-        <button 
-            onClick={() => handleQuickAction('capabilities')}
-            disabled={isLoading}
-            className="flex items-center justify-center space-x-1 bg-gray-700 hover:bg-gray-600 text-gray-200 py-2 px-3 rounded text-xs font-medium transition-colors disabled:opacity-50"
-            title="Learn what the AI assistant can do."
-        >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-            <span>Capabilities</span>
-        </button>
-      </div>
 
-      {/* Messages */}
-      <div className="flex-grow overflow-y-auto p-4 space-y-4 bg-gray-900/50">
-        {messages.map((msg) => {
-            const isAnalyticalResponse = msg.role === 'model' && !msg.isError && !msg.isWarning && (msg.text.length > 100 || msg.text.includes('[Log ID:'));
-            return (
-              <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`relative group max-w-[90%] rounded-lg p-3 text-xs leading-relaxed shadow-sm ${
-                    msg.role === 'user' 
-                      ? 'bg-blue-600 text-white' 
-                      : msg.isError
-                        ? 'bg-red-900/50 border border-red-700 text-red-200'
-                        : msg.isWarning
-                          ? 'bg-yellow-900/50 border border-yellow-700 text-yellow-200'
-                          : 'bg-gray-700 text-gray-200 border border-gray-600'
-                }`}>
-                  <div className="flex items-start">
-                      {msg.isWarning && (
-                        <div className="mr-2 flex-shrink-0 text-yellow-400 pt-0.5">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-                        </div>
-                      )}
-                      <div className="flex-1">
-                         <FormattedMessage text={msg.text} onScrollToLog={onScrollToLog} />
-                      </div>
-                      {msg.isError && (
-                          <button 
-                              onClick={() => handleRetry(msg.id)}
-                              className="ml-2 p-1 text-red-400 hover:text-red-300 hover:bg-red-900/50 rounded transition-colors flex-shrink-0"
-                              title="Retry"
-                          >
-                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                          </button>
-                      )}
-                  </div>
-                   {isAnalyticalResponse && (
-                      <button
-                        onClick={() => onSaveFinding(msg.text)}
-                        className="absolute top-1 right-1 p-1 bg-gray-800/50 rounded-full text-gray-400 hover:text-white hover:bg-gray-700 opacity-0 group-hover:opacity-100 transition-opacity"
-                        title="Save this finding for future sessions with this log source"
-                      >
-                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"></path></svg>
-                      </button>
-                   )}
+        {isSettingsOpen && (
+            <div className="p-3 bg-gray-900/50 border-b border-gray-700 space-y-3 text-xs">
+                <div>
+                    <label className="font-semibold text-gray-300 block mb-1">AI Model</label>
+                    <select value={modelTier} onChange={e => setModelTier(e.target.value)} className="w-full bg-gray-700 text-white rounded py-1 px-2 border border-gray-600 focus:ring-1 focus:ring-blue-500 focus:outline-none">
+                        <option value="gemini-2.5-flash">Gemini 2.5 Flash (Cloud)</option>
+                        <option value="gemini-3-pro-preview">Gemini 3 Pro (Cloud)</option>
+                        <option value="web-llm">Llama 3 (Local)</option>
+                    </select>
+                    <p className="text-[10px] text-gray-500 mt-1">Local model runs entirely in your browser for maximum privacy. Cloud models are more powerful but send data to Google.</p>
                 </div>
-              </div>
-            )
-        })}
-        {isLoading && (
-            <div className="flex justify-start">
-                <div className="bg-gray-700 rounded-lg p-3 border border-gray-600 flex flex-col items-start space-y-2 max-w-[90%]">
-                    <div className="flex items-center space-x-2">
-                        <div className="flex space-x-1">
-                            <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"></div>
-                            <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-                            <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
-                        </div>
-                        <span className="text-[10px] text-gray-400">
-                            {modelTier === 'gemini-3-pro-preview' ? 'Reasoning...' :
-                             modelTier === 'gemini-2.5-flash' ? 'Analyzing...' :
-                             modelTier === 'local' ? (downloadProgress ? 'Initializing...' : 'Processing locally (Nano)...') : 
-                             modelTier === 'webllm' ? (downloadProgress ? 'Initializing...' : 'Thinking (Llama 3)...') :
-                             'Analyzing logs...'}
-                        </span>
-                    </div>
-                    {downloadProgress && (
-                        <div className="w-full">
-                            <div className="text-[9px] text-gray-500 font-mono mb-1 truncate">{downloadProgress}</div>
-                            <div className="w-full bg-gray-900 rounded-full h-1">
-                                <div className="bg-blue-500 h-1 rounded-full transition-all duration-300" style={{ width: '100%' }}></div>
-                            </div>
-                        </div>
-                    )}
+                 <div>
+                    <label htmlFor="api-key-input" className="font-semibold text-gray-300 block mb-1">Google AI API Key (Optional)</label>
+                    <input 
+                       id="api-key-input"
+                       type="password"
+                       value={tempApiKey}
+                       onChange={(e) => setTempApiKey(e.target.value)}
+                       placeholder="Enter your key to override default"
+                       className="w-full bg-gray-700 text-white rounded py-1 px-2 border border-gray-600 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                    />
+                     <p className="text-[10px] text-gray-500 mt-1">If you provide your own key, it will be used for all cloud model requests. Stored in local storage.</p>
+                </div>
+                <div className="flex justify-end">
+                    <button onClick={handleSaveSettings} className="bg-blue-600 text-white px-3 py-1 rounded text-xs hover:bg-blue-700">Save</button>
                 </div>
             </div>
         )}
-        <div ref={messagesEndRef} />
-      </div>
+        
+        {showWebLlmConsent && (
+            <div className="p-3 bg-yellow-900/50 border-b border-yellow-700 space-y-2 text-xs">
+                <p className="font-semibold text-yellow-200">Local Model Download</p>
+                <p className="text-yellow-300 text-[10px]">The Llama 3 model is ~2GB and needs to be downloaded and cached by your browser. This is a one-time download per device. Do you want to proceed?</p>
+                <div className="flex justify-end space-x-2">
+                    <button onClick={() => handleConsent(false)} className="bg-gray-600 text-white px-2 py-0.5 rounded text-xs hover:bg-gray-500">Cancel</button>
+                    <button onClick={() => handleConsent(true)} className="bg-yellow-600 text-white px-2 py-0.5 rounded text-xs hover:bg-yellow-700">Download</button>
+                </div>
+            </div>
+        )}
 
-      {/* Input */}
-      <form onSubmit={handleSubmit} className="p-4 border-t border-gray-700 bg-gray-800">
-        <div className="flex space-x-2">
-            <input
-                type="text"
+        <div className="flex-grow p-3 overflow-y-auto space-y-4">
+          {messages.map((message, index) => (
+            <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`relative max-w-sm md:max-w-md p-2 rounded-lg text-white ${message.role === 'user' ? 'bg-blue-600' : (message.isError ? 'bg-red-800' : 'bg-gray-700')}`}>
+                 {message.role === 'model' && index > 0 && !message.isError && (
+                    <div className="absolute top-0 right-0 flex -translate-y-1/2 translate-x-1/2 space-x-0.5">
+                       {savedFindings.includes(message.text) ? (
+                            <div className="p-0.5 rounded-full bg-green-600 text-white" title="Finding Saved">
+                                <svg className="w-2 h-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
+                            </div>
+                       ) : (
+                            <button
+                                onClick={() => onSaveFinding(message.text)}
+                                className="p-0.5 rounded-full text-gray-400 bg-gray-800 border border-gray-600 hover:text-white hover:bg-gray-600"
+                                title="Save this finding"
+                            >
+                                <svg className="w-2 h-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"></path></svg>
+                            </button>
+                       )}
+                    </div>
+                 )}
+                 <FormattedMessage text={message.text} onScrollToLog={onScrollToLog} />
+              </div>
+            </div>
+          ))}
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="max-w-sm md:max-w-md p-2 rounded-lg bg-gray-700 text-white">
+                <div className="flex items-center space-x-2 text-xs">
+                    <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0s' }}></div>
+                    <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }}></div>
+                    <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }}></div>
+                    {downloadProgress && <span className="text-gray-400 text-[10px]">{downloadProgress}</span>}
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+        
+        <div className="flex-shrink-0 p-2 border-t border-gray-700 bg-gray-800 space-y-1">
+            <div className="flex flex-wrap gap-1">
+                {quickPrompts.map(p => (
+                    <button 
+                       key={p}
+                       onClick={() => { setInput(p); setTimeout(() => handleSubmit(), 50); }}
+                       disabled={isLoading}
+                       className="px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-full text-[10px] transition-colors disabled:opacity-50"
+                    >
+                        {p}
+                    </button>
+                ))}
+            </div>
+            <form onSubmit={handleSubmit} className="flex items-center space-x-2">
+              <textarea
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Message AI..."
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSubmit();
+                  }
+                }}
+                placeholder="Ask about your logs..."
                 disabled={isLoading}
-                className="flex-grow bg-gray-900 border border-gray-600 text-white rounded-md px-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
-            />
-            <button
+                rows={1}
+                className="flex-grow bg-gray-700 border border-gray-600 text-white text-xs rounded-md shadow-sm p-2 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-800 resize-none"
+              />
+              <button
                 type="submit"
-                disabled={!input.trim() || isLoading}
-                className="bg-blue-600 text-white p-2 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:bg-gray-600 transition-colors"
-            >
-                <svg className="w-4 h-4 transform rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
-            </button>
+                disabled={isLoading || !input.trim()}
+                className="bg-blue-600 text-white p-2 rounded-md hover:bg-blue-700 transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed"
+                aria-label="Send message"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+              </button>
+            </form>
         </div>
-      </form>
+      </div>
     </div>
-
-    {/* Settings Modal */}
-    {isSettingsOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-            <div className="bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-md p-6">
-                <div className="flex justify-between items-center mb-4">
-                    <h3 className="text-lg font-bold text-white">Settings</h3>
-                    <button onClick={() => setIsSettingsOpen(false)} className="text-gray-400 hover:text-white">
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                    </button>
-                </div>
-                
-                <div className="space-y-4">
-                    <div>
-                        <label className="block text-xs font-medium text-gray-300 mb-1">Google Gemini API Key</label>
-                        <input 
-                            type="password" 
-                            value={tempApiKey}
-                            onChange={(e) => setTempApiKey(e.target.value)}
-                            placeholder="AIza..."
-                            className="w-full bg-gray-900 border border-gray-600 text-white rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                        />
-                        <p className="text-[10px] text-gray-500 mt-1">
-                            Your key is stored locally in your browser and used only for AI requests. 
-                            If you have set a VITE_API_KEY environment variable, it will be prioritized over this one.
-                        </p>
-                         <p className="text-[10px] text-gray-500 mt-2">
-                          Don't have a key? Get one from{' '}
-                          <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">
-                            Google AI Studio
-                          </a>.
-                        </p>
-                    </div>
-                </div>
-
-                <div className="mt-6 flex justify-end space-x-2">
-                    <button 
-                        onClick={() => setIsSettingsOpen(false)}
-                        className="px-4 py-2 bg-gray-700 text-gray-200 text-sm rounded-md hover:bg-gray-600 transition-colors"
-                    >
-                        Cancel
-                    </button>
-                    <button 
-                        onClick={handleSaveSettings}
-                        className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors"
-                    >
-                        Save Key
-                    </button>
-                </div>
-            </div>
-        </div>
-    )}
-
-    {/* WebLLM Consent Modal */}
-    {showWebLlmConsent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-            <div className="bg-gray-800 rounded-lg shadow-xl border border-gray-700 w-full max-w-md">
-                <div className="p-6">
-                    <div className="flex items-start space-x-4">
-                        <div className="flex-shrink-0 h-10 w-10 flex items-center justify-center rounded-full bg-gray-700">
-                            <svg className="h-6 w-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
-                        </div>
-                        <div>
-                            <h3 className="text-lg font-bold text-white">Enable On-Device AI</h3>
-                            <p className="text-xs text-gray-400 mt-1 leading-relaxed">
-                                To use the on-device AI, a large model file needs to be downloaded and cached in your browser.
-                            </p>
-                        </div>
-                    </div>
-
-                    <div className="mt-4 bg-gray-900/50 border border-gray-700 rounded-md p-3 text-xs space-y-2">
-                        <div className="flex justify-between items-center">
-                            <span className="font-medium text-gray-400">Model Size</span>
-                            <span className="font-mono text-gray-200">~2 GB</span>
-                        </div>
-                        <div className="flex justify-between items-center">
-                            <span className="font-medium text-gray-400">Download</span>
-                            <span className="font-mono text-gray-200">One-time only</span>
-                        </div>
-                        <div className="flex justify-between items-center">
-                            <span className="font-medium text-gray-400">Privacy</span>
-                            <span className="font-mono text-green-400">100% Local</span>
-                        </div>
-                    </div>
-                </div>
-                
-                <div className="bg-gray-700/50 px-6 py-3 flex justify-end space-x-2 rounded-b-lg">
-                    <button 
-                        onClick={handleWebLlmConsentCancel}
-                        className="px-4 py-2 bg-gray-600 text-gray-200 text-sm rounded-md hover:bg-gray-500 transition-colors"
-                    >
-                        Cancel
-                    </button>
-                    <button 
-                        onClick={handleWebLlmConsentAccept}
-                        className="px-4 py-2 bg-blue-600 text-white text-sm rounded-md hover:bg-blue-700 transition-colors"
-                    >
-                        Accept & Download
-                    </button>
-                </div>
-            </div>
-        </div>
-    )}
-    </>
   );
 };

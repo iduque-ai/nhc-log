@@ -567,7 +567,7 @@ You have a set of tools to interact with the log viewer.
             try {
                 const responseText = m.text.substring('Tool Response:'.length).trim();
                 const response = JSON.parse(responseText);
-                acc.push({ role: 'tool', parts: [{ functionResponse: response }] } as Content);
+                acc.push({ role: 'tool', parts: [{ functionResponse: response }] } as unknown as Content);
             } catch {
                 acc.push({ role: 'model', parts: [{ text: m.text }] });
             }
@@ -599,7 +599,7 @@ You have a set of tools to interact with the log viewer.
                 }
             });
             response = {
-                text: result.text,
+                text: (result as any).text,
                 functionCalls: result.functionCalls,
                 candidates: result.candidates,
             }
@@ -664,7 +664,7 @@ You have a set of tools to interact with the log viewer.
                     toolResponseParts.push({ functionResponse: { name: toolCall.name, response: { result: JSON.stringify(errorResult) } } });
                     break;
             }
-            history.push({ role: 'tool', parts: toolResponseParts } as Content);
+            history.push({ role: 'tool', parts: toolResponseParts } as unknown as Content);
 
         } else if (response.text) {
             const finalText = response.text;

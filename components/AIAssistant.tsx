@@ -6,7 +6,7 @@ import { LogEntry, FilterState } from '../types.ts';
 
 // FIX: Local definition to solve import issue with GenerateContentResponse
 interface GenerateContentResponse {
-  text: string | undefined;
+  text?: string | undefined;
   functionCalls?: { name: string; args: any; }[];
   candidates?: { content?: Content }[];
 }
@@ -324,7 +324,7 @@ const WEB_LLM_MODEL_ID = "Llama-3.2-3B-Instruct-q4f16_1-MLC";
 const WEBLMM_CONSENT_KEY = 'nhc_log_viewer_webllm_consent';
 
 // Helper to parse a tool call from local model output (raw JSON or markdown)
-const parseLocalToolCall = (text: string): { tool_name: string, arguments: any } | null => {
+const parseLocalToolCall = (text: string): { tool_name: string; arguments: any } | null => {
     let jsonString = text.trim();
     const jsonRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
     const match = jsonString.match(jsonRegex);
@@ -394,7 +394,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ isOpen, onClose, visib
     setMessages(prev => [...prev, { id: Date.now().toString(), role, text, isError }]);
   }, []);
   
-  const handleToolCall = useCallback((toolName: string, args: any) => {
+  const handleToolCall = useCallback((toolName: string, args: any): any => {
     switch (toolName) {
       case 'update_filters':
         onUpdateFilters({
@@ -552,38 +552,33 @@ You have a set of tools to interact with the log viewer.
 - You can use markdown for formatting (bold, lists, code blocks).
 `;
 
-    const history: Content[] = messages.slice(1) // Exclude welcome message
-      .flatMap(m => {
-          // Heuristic: Don't include error/warning messages in history to prevent confusion
-          if (m.isError || m.isWarning) return [];
-          
-          // Crude attempt to find tool calls/responses in past messages to reconstruct history.
-          // This is a simplified approach. A more robust solution would store the structured
-          // tool calls and responses separately in the message history state.
-          if (m.role === 'model' && m.text.startsWith('Tool Call:')) {
-              try {
-                  const callText = m.text.substring('Tool Call:'.length).trim();
-                  const call = JSON.parse(callText);
-                  return [{ role: 'model' as const, parts: [{ functionCall: call }] }];
-              } catch {
-                  return [{ role: 'model' as const, parts: [{ text: m.text }] }];
-              }
-          }
-          if (m.role === 'model' && m.text.startsWith('Tool Response:')) {
-              try {
-                  const responseText = m.text.substring('Tool Response:'.length).trim();
-                  const response = JSON.parse(responseText);
-                  return [{ role: 'tool' as const, parts: [{ functionResponse: response }] }];
-              } catch {
-                  return [{ role: 'model' as const, parts: [{ text: m.text }] }];
-              }
-          }
+    const history: Content[] = messages.slice(1).reduce((acc: Content[], m) => {
+        if (m.isError || m.isWarning) return acc;
 
-          return [{
-              role: m.role,
-              parts: [{ text: m.text }],
-          }];
-      });
+        if (m.role === 'model' && m.text.startsWith('Tool Call:')) {
+            try {
+                const callText = m.text.substring('Tool Call:'.length).trim();
+                const call = JSON.parse(callText);
+                acc.push({ role: 'model', parts: [{ functionCall: call }] });
+            } catch {
+                acc.push({ role: 'model', parts: [{ text: m.text }] });
+            }
+        } else if (m.role === 'model' && m.text.startsWith('Tool Response:')) {
+            try {
+                const responseText = m.text.substring('Tool Response:'.length).trim();
+                const response = JSON.parse(responseText);
+                acc.push({ role: 'tool', parts: [{ functionResponse: response }] } as Content);
+            } catch {
+                acc.push({ role: 'model', parts: [{ text: m.text }] });
+            }
+        } else {
+            acc.push({
+                role: m.role,
+                parts: [{ text: m.text }],
+            });
+        }
+        return acc;
+    }, []);
 
     history.push({ role: 'user', parts: [{ text: prompt }] });
     
@@ -595,12 +590,19 @@ You have a set of tools to interact with the log viewer.
 
         let response: GenerateContentResponse;
         try {
-            response = await ai.models.generateContent({
+            const result = await ai.models.generateContent({
                 model: modelToUse,
                 contents: history,
-                tools: [{ functionDeclarations: getAvailableTools(conversationStateRef.current) }],
-                systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+                config: {
+                    tools: [{ functionDeclarations: getAvailableTools(conversationStateRef.current) }],
+                    systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+                }
             });
+            response = {
+                text: result.text,
+                functionCalls: result.functionCalls,
+                candidates: result.candidates,
+            }
         } catch (e: any) {
             console.error("Gemini API Error:", e);
             if (e.message && (e.message.toLowerCase().includes('rate limit') || e.message.toLowerCase().includes('quota'))) {
@@ -635,7 +637,7 @@ You have a set of tools to interact with the log viewer.
                 }
                 case 'search_logs': {
                     const result = handleToolCall(toolCall.name, toolCall.args);
-                    if (result.logs.length > 0) {
+                    if (result.logs && result.logs.length > 0) {
                         conversationStateRef.current = 'ANALYZING';
                         console.log('[AI State] Transitioning to ANALYZING after finding data.');
                     }
@@ -658,10 +660,11 @@ You have a set of tools to interact with the log viewer.
                     break;
                 }
                 default:
-                    toolResponseParts.push({ functionResponse: { name: toolCall.name, response: { error: `Tool "${toolCall.name}" is not supported.` } } });
+                    const errorResult = { error: `Tool "${toolCall.name}" is not supported.` };
+                    toolResponseParts.push({ functionResponse: { name: toolCall.name, response: { result: JSON.stringify(errorResult) } } });
                     break;
             }
-            history.push({ role: 'tool', parts: toolResponseParts });
+            history.push({ role: 'tool', parts: toolResponseParts } as Content);
 
         } else if (response.text) {
             const finalText = response.text;

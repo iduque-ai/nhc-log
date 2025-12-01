@@ -1,8 +1,15 @@
 // FIX: Imported `useMemo` from React to resolve reference error.
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { GoogleGenAI, Type, FunctionDeclaration, Content, Part, FunctionCall } from "@google/genai";
+import { GoogleGenAI, Type, FunctionDeclaration, Content, Part } from "@google/genai";
 import { CreateMLCEngine } from "@mlc-ai/web-llm";
 import { LogEntry, FilterState, LogLevel } from '../types.ts';
+
+// Define FunctionCall locally since it is not exported by the SDK
+interface FunctionCall {
+  name: string;
+  args: Record<string, any>;
+  id?: string;
+}
 
 // FIX: Local definition to match SDK response structure or augment it
 interface GenerateContentResponse {
@@ -630,7 +637,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
             // Fix: Extract text safely to avoid SDK warning about non-text parts (function calls)
             const responseTextCandidate = result.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || undefined;
             
-            response = { text: responseTextCandidate, functionCalls: result.functionCalls, candidates: result.candidates };
+            response = { text: responseTextCandidate, functionCalls: result.functionCalls as FunctionCall[], candidates: result.candidates };
             
             const responseText = response.text || "";
             const responseChars = responseText.length + JSON.stringify(response.functionCalls || {}).length;
@@ -670,7 +677,9 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
                  break;
             }
 
-            history.push({ role: 'model', parts: [{ functionCall: toolCall }] });
+            // Cast local FunctionCall to unknown, then to any to satisfy the strict Part type requirements of the SDK,
+            // or simply ensure property alignment. The SDK's Part type usually accepts an object with `functionCall`.
+            history.push({ role: 'model', parts: [{ functionCall: toolCall } as any] });
             
             console.groupCollapsed(`[AI] Executing tool: ${toolCall.name}`);
             console.log('[AI] Arguments:', toolCall.args);

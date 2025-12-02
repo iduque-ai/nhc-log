@@ -1,4 +1,4 @@
-// FIX: Imported `useMemo` from React to resolve reference error.
+
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { GoogleGenAI, Type, FunctionDeclaration, Content, Part } from "@google/genai";
 import { CreateMLCEngine } from "@mlc-ai/web-llm";
@@ -11,11 +11,17 @@ interface FunctionCall {
   id?: string;
 }
 
-// FIX: Local definition to match SDK response structure or augment it
+// Local definition to match SDK response structure or augment it
 interface GenerateContentResponse {
   text?: string | undefined;
   functionCalls?: FunctionCall[];
   candidates?: { content?: Content }[];
+}
+
+interface FilterAction {
+  type: 'apply_filter';
+  payload: Partial<FilterState>;
+  label: string;
 }
 
 interface AIAssistantProps {
@@ -35,6 +41,12 @@ interface Message {
   text: string;
   isError?: boolean;
   isWarning?: boolean;
+  action?: FilterAction;
+}
+
+interface DownloadStatus {
+  text: string;
+  progress: number; // 0 to 1
 }
 
 // Extend Window interface for Chrome's Built-in AI
@@ -53,11 +65,35 @@ declare global {
   }
 }
 
+// --- Helpers for Efficient Search ---
+
+// Find the first index where value >= target (Lower Bound)
+const lowerBound = (arr: number[], value: number): number => {
+    let l = 0, r = arr.length;
+    while (l < r) {
+        const m = (l + r) >>> 1;
+        if (arr[m] < value) l = m + 1;
+        else r = m;
+    }
+    return l;
+};
+
+// Find the first index in logs where timestamp >= targetTime
+const findLogStartIndex = (logs: LogEntry[], time: number): number => {
+    let l = 0, r = logs.length;
+    while (l < r) {
+        const m = (l + r) >>> 1;
+        if (logs[m].timestamp.getTime() < time) l = m + 1;
+        else r = m;
+    }
+    return l;
+};
+
 // --- Tool Definitions ---
 
 const updateFiltersTool: FunctionDeclaration = {
   name: 'update_filters',
-  description: 'Creates a NEW TAB with specific filters to isolate logs. Use this when the user asks to "show errors", "filter by daemon", or "isolate logs". This does NOT affect the current view, it opens a new one.',
+  description: 'Updates the log filters. Use this when the user explicitly asks to filter logs (e.g., "show me error logs", "filter by daemon X"). If the user is just asking for analysis and you think filtering would help, set apply_immediately to false to show a suggestion button.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -84,6 +120,10 @@ const updateFiltersTool: FunctionDeclaration = {
       reset_before_applying: {
         type: Type.BOOLEAN,
         description: 'If true, assumes a fresh slate (default true for new tabs).',
+      },
+      apply_immediately: {
+        type: Type.BOOLEAN,
+        description: 'Set to true if the user explicitly commanded to change filters (e.g. "filter by...", "show only..."). Set to false if this is a proactive suggestion based on analysis.',
       }
     },
   },
@@ -220,7 +260,12 @@ const getLogPattern = (message: string): string => {
 // --- Formatted Message Component ---
 
 const renderInlineMarkdown = (text: string, onScrollToLog: (id: number) => void): React.ReactNode => {
-    const parts = text.split(/(\[Log ID: \d+\]|\[.*?\]\(.*?\)|https?:\/\/[^\s\)]+)/g);
+    // Regex matches:
+    // 1. [Log ID: 123] -> Clickable
+    // 2. :::scroll_to_log(123)::: -> Clickable (Safety net for local hallucinations)
+    // 3. [text](url) -> Link
+    // 4. http(s)://... -> Link
+    const parts = text.split(/(\[Log ID: \d+\]|:::scroll_to_log\(\d+\):::|\[.*?\]\(.*?\)|https?:\/\/[^\s\)]+)/g);
 
     return parts.map((part, i) => {
         const logIdMatch = part.match(/^\[Log ID: (\d+)\]$/);
@@ -237,6 +282,22 @@ const renderInlineMarkdown = (text: string, onScrollToLog: (id: number) => void)
                     <span>#{id}</span>
                 </button>
             );
+        }
+
+        const shorthandMatch = part.match(/^:::scroll_to_log\((\d+)\):::$/);
+        if (shorthandMatch) {
+             const id = parseInt(shorthandMatch[1], 10);
+             return (
+                 <button
+                    key={i}
+                    onClick={() => onScrollToLog(id)}
+                    className="inline-flex items-center gap-1 text-green-400 hover:text-green-200 underline decoration-green-500/50 hover:decoration-green-400 font-mono cursor-pointer bg-green-900/20 hover:bg-green-900/40 px-1.5 rounded mx-0.5 transition-colors align-baseline text-[11px]"
+                    title={`Click to scroll to log #${id}`}
+                >
+                    <svg className="w-3 h-3 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" /></svg>
+                    <span>Go to #{id}</span>
+                </button>
+             );
         }
 
         const linkMatch = part.match(/^\[(.*?)\]\((.*?)\)$/);
@@ -266,7 +327,7 @@ const renderInlineMarkdown = (text: string, onScrollToLog: (id: number) => void)
                     return (
                         <span key={j}>
                             {codeParts.map((codePart, k) => {
-                                if (k % 2 === 1) return <code key={k} className="bg-gray-800 text-blue-200 px-1 py-0.5 rounded font-mono text-[11px] border border-gray-700/50">{codePart}</code>;
+                                if (k % 2 === 1) return <code key={k} className="bg-gray-800 text-blue-200 px-1 py-0.5 rounded font-mono text-[11px] border border-gray-700/50 break-all">{codePart}</code>;
                                 return codePart;
                             })}
                         </span>
@@ -285,8 +346,8 @@ const FormattedMessage: React.FC<{ text: string; onScrollToLog: (id: number) => 
                 if (part.startsWith('```')) {
                     const content = part.replace(/^```\w*\n?/, '').replace(/```$/, '');
                     return (
-                        <div key={index} className="bg-gray-950 rounded p-2 overflow-x-auto border border-gray-700">
-                             <pre className="font-mono text-[10px] text-gray-300 whitespace-pre-wrap">{content}</pre>
+                        <div key={index} className="bg-gray-950 rounded p-2 overflow-x-auto border border-gray-700 max-w-full">
+                             <pre className="font-mono text-[10px] text-gray-300 whitespace-pre-wrap break-all">{content}</pre>
                         </div>
                     );
                 }
@@ -337,7 +398,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
     }
   ]);
   const [isLoading, setIsLoading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState<string>('');
+  const [downloadStatus, setDownloadStatus] = useState<DownloadStatus | null>(null);
   const [modelTier, setModelTier] = useState<string>('gemini-2.5-flash');
   const [showWebLlmConsent, setShowWebLlmConsent] = useState(false);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
@@ -356,22 +417,14 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
   const [tempDisableLocalSearch, setTempDisableLocalSearch] = useState(false);
 
   // --- 1. Efficient Indexing using useMemo ---
-  // Create an index for Levels and Daemons. This is O(N) once and allows O(1) lookups during search.
-  // This satisfies the requirement to "index logs by timestamp or level for faster retrieval".
   const logIndex = useMemo(() => {
     const levels: Record<string, number[]> = {};
     const daemons: Record<string, number[]> = {};
-    
-    // Performance optimization: Using a simple loop is generally faster than reduce for large arrays
     const len = allLogs.length;
     for (let i = 0; i < len; i++) {
         const log = allLogs[i];
-        
-        // Index by Level
         if (!levels[log.level]) levels[log.level] = [];
         levels[log.level].push(i);
-
-        // Index by Daemon (normalized)
         const d = (log.daemon || '').toLowerCase();
         if (d) {
             if (!daemons[d]) daemons[d] = [];
@@ -439,22 +492,27 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
   
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
+  }, [messages, isLoading, downloadStatus]);
 
-  const addMessage = useCallback((role: 'user' | 'model', text: string, isError = false, isWarning = false) => {
-    setMessages(prev => [...prev, { id: Date.now().toString() + Math.random(), role, text, isError, isWarning }]);
+  const addMessage = useCallback((role: 'user' | 'model', text: string, isError = false, isWarning = false, action?: FilterAction) => {
+    setMessages(prev => [...prev, { id: Date.now().toString() + Math.random(), role, text, isError, isWarning, action }]);
   }, []);
   
   const handleToolCall = useCallback(async (toolName: string, args: any, aiInstance?: GoogleGenAI): Promise<any> => {
     switch (toolName) {
       case 'update_filters':
-        onUpdateFilters({
-          selectedLevels: args.log_levels,
-          selectedDaemons: args.daemons,
-          keywordQueries: args.search_keywords,
-          keywordMatchMode: args.keyword_match_mode || 'OR',
-        }, args.reset_before_applying ?? true);
-        return { success: true, summary: `Created a new tab with the specified filters.` };
+        if (args.apply_immediately) {
+             const filters = {
+                 selectedLevels: args.log_levels || [],
+                 selectedDaemons: args.daemons || [],
+                 keywordQueries: args.search_keywords || [],
+                 keywordMatchMode: args.keyword_match_mode || 'OR',
+             };
+             onUpdateFilters(filters, args.reset_before_applying ?? true);
+             return { success: true, summary: `Filters applied immediately as requested.` };
+        }
+        // Instead of executing immediately, we acknowledge the suggestion.
+        return { success: true, summary: `Filter suggestion created. User can apply it via the UI.` };
       
       case 'scroll_to_log':
         onScrollToLog(Number(args.log_id));
@@ -551,11 +609,10 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
       }
         
       case 'suggest_solution': {
-          if (!aiInstance) return { summary: 'Cannot suggest solution without AI instance.' };
+          if (!aiInstance) return { summary: 'Local AI cannot suggest solution using Cloud Tools. Please answer based on your knowledge.' };
           const solutionPrompt = `Based on the following error message, act as a senior software engineer and provide a concise, actionable list of potential causes and solutions. Error: "${args.error_message}"`;
           try {
               const result = await aiInstance.models.generateContent({ model: 'gemini-2.5-flash', contents: [{ role: 'user', parts: [{ text: solutionPrompt }] }] });
-              // FIX: Replace deprecated result.text with robust text extraction
               const text = result.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || "Could not generate a solution.";
               return { solution: text };
           } catch (e: any) {
@@ -566,7 +623,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
       default:
         return { error: `Tool "${toolName}" not found.` };
     }
-  }, [allLogs, onUpdateFilters, onScrollToLog]);
+  }, [allLogs, onScrollToLog, onUpdateFilters]);
 
   const runCloudAI = useCallback(async (prompt: string, effectiveModel: string) => {
     const apiKey = userApiKey || import.meta.env.VITE_API_KEY;
@@ -584,19 +641,14 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
     
     const ai = new GoogleGenAI({ apiKey });
 
-    const systemPrompt = `You are an expert AI assistant embedded in a log analysis tool. Your primary goal is to help users understand their logs and identify problems.
+    let systemPrompt = `You are an expert AI assistant embedded in a log analysis tool. Your primary goal is to help users understand their logs and identify problems.
 # CONTEXT
 - Total logs across all files: ${allLogs.length.toLocaleString()}
-- Available Daemons: ${allDaemons.join(', ') || 'N/A'}
-- Previously saved findings: ${savedFindings.length > 0 ? savedFindings.join('; ') : 'None'}
+- Available Daemons: ${allDaemons.join(', ') || 'N/A'}`;
 
-# RESPONSE GUIDELINES
-- I may have already provided a Local Search Summary in the user prompt. ALWAYS check this first.
-- If the Local Search Summary contains relevant logs, USE THEM to answer the question immediately. Do NOT call 'search_logs' for the same keywords.
-- Only use tools if the local context is missing or insufficient.
-- Think step-by-step.
-- When you find a specific log, ALWAYS mention its ID using the format [Log ID: 123] so the user can click it.
-- Be concise.`;
+    if (effectiveModel === 'gemini-2.5-pro') {
+        systemPrompt += `\n\nIMPORTANT: You are running on a model with strict rate limits. Try to answer the user's question IMMEDIATELY using the provided context. Do NOT call tools like 'search_logs' unless the local context is completely irrelevant or empty.`;
+    }
 
     const history: Content[] = messages.slice(1).reduce((acc: Content[], m) => {
         if (m.isError || m.isWarning) return acc;
@@ -621,7 +673,9 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
     console.log('[AI] Full Payload:', { contents: history, config: payloadConfig });
     console.groupEnd();
     
+    let pendingFilterAction: FilterAction | null = null;
     const MAX_TURNS = 10;
+    
     for (let turn = 1; turn <= MAX_TURNS; turn++) {
         console.groupCollapsed(`[AI] Turn ${turn}/${MAX_TURNS}`);
         console.log(`[AI] State: ${conversationStateRef.current}`);
@@ -634,7 +688,6 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
                 config: payloadConfig
             });
             
-            // Fix: Extract text safely to avoid SDK warning about non-text parts (function calls)
             const responseTextCandidate = result.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || undefined;
             
             response = { text: responseTextCandidate, functionCalls: result.functionCalls as FunctionCall[], candidates: result.candidates };
@@ -677,6 +730,50 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
                  break;
             }
 
+            // Capture potential actions to show to the user
+            if (toolCall.name === 'search_logs') {
+                pendingFilterAction = {
+                    type: 'apply_filter',
+                    label: 'Apply Search Filters',
+                    payload: {
+                        keywordQueries: toolCall.args.keywords || [], // Default empty array for action payload
+                        keywordMatchMode: toolCall.args.match_mode || 'OR'
+                    }
+                };
+            } else if (toolCall.name === 'update_filters') {
+                if (!toolCall.args.apply_immediately) {
+                    const labels = [];
+                    if (toolCall.args.log_levels?.length) labels.push(toolCall.args.log_levels.join('|'));
+                    if (toolCall.args.daemons?.length) labels.push(toolCall.args.daemons.join('|'));
+                    if (toolCall.args.search_keywords?.length) labels.push(`"${toolCall.args.search_keywords.join(' ')}"`);
+                    
+                    pendingFilterAction = {
+                        type: 'apply_filter',
+                        label: labels.length > 0 ? `Filter: ${labels.join(', ')}` : 'Apply Suggested Filters',
+                        payload: {
+                            selectedLevels: toolCall.args.log_levels || [],
+                            selectedDaemons: toolCall.args.daemons || [],
+                            keywordQueries: toolCall.args.search_keywords || [],
+                            keywordMatchMode: toolCall.args.keyword_match_mode || 'OR',
+                        }
+                    };
+                }
+            } else if (toolCall.name === 'trace_error_origin') {
+                 const logId = toolCall.args.error_log_id;
+                 const log = allLogs.find(l => l.id === logId);
+                 if (log) {
+                     const end = log.timestamp;
+                     const start = new Date(end.getTime() - (toolCall.args.trace_window_seconds || 60) * 1000);
+                     pendingFilterAction = {
+                        type: 'apply_filter',
+                        label: `Isolate Trace (${toolCall.args.trace_window_seconds || 60}s)`,
+                        payload: {
+                            dateRange: [start, end]
+                        }
+                    };
+                 }
+            }
+
             // Cast local FunctionCall to unknown, then to any to satisfy the strict Part type requirements of the SDK,
             // or simply ensure property alignment. The SDK's Part type usually accepts an object with `functionCall`.
             history.push({ role: 'model', parts: [{ functionCall: toolCall } as any] });
@@ -697,7 +794,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
         } else {
             const text = response.text || "I'm sorry, I couldn't generate a response.";
             console.log('[AI] Model returned final answer.');
-            addMessage('model', text);
+            addMessage('model', text, false, false, pendingFilterAction || undefined);
             conversationStateRef.current = 'IDLE';
             console.groupEnd(); // End turn group
             break;
@@ -709,20 +806,377 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
   
   const mlcEngine = useRef<any>(null);
 
+  const executeLocalAI = useCallback(async (initialPrompt: string) => {
+    if (!mlcEngine.current) return;
+    setIsLoading(true);
+    setDownloadStatus(null);
+
+    // Limit daemons context to top 50 to improve prefill speed
+    const limitedDaemons = allDaemons.slice(0, 50);
+    const daemonContextStr = limitedDaemons.length < allDaemons.length 
+        ? `${limitedDaemons.join(', ')}... (+${allDaemons.length - 50} more)` 
+        : limitedDaemons.join(', ');
+
+    const localToolsSchema = [
+        {
+            name: "scroll_to_log",
+            description: "Scroll the viewer to a specific log entry.",
+            parameters: {
+                type: "object",
+                properties: { log_id: { type: "number", description: "The ID of the log" } },
+                required: ["log_id"]
+            }
+        },
+        {
+            name: "update_filters",
+            description: "Updates log filters. Set apply_immediately=true for user commands (e.g., 'show error logs'). Set apply_immediately=false if suggesting a filter.",
+            parameters: {
+                type: "object",
+                properties: {
+                    daemons: { type: "array", items: { type: "string" } },
+                    log_levels: { type: "array", items: { type: "string" } },
+                    search_keywords: { type: "array", items: { type: "string" } },
+                    apply_immediately: { type: "boolean" }
+                }
+            }
+        },
+        {
+            name: "search_logs",
+            description: "Search all logs for keywords.",
+            parameters: {
+                type: "object",
+                properties: {
+                    keywords: { type: "array", items: { type: "string" } },
+                    match_mode: { type: "string", enum: ["AND", "OR"] }
+                },
+                required: ["keywords"]
+            }
+        },
+        {
+            name: "find_log_patterns",
+            description: "Analyze patterns in the logs.",
+            parameters: {
+                type: "object",
+                properties: {
+                    pattern_type: { type: "string", enum: ["repeating_error", "frequency_spike"] },
+                    time_window_minutes: { type: "number" }
+                },
+                required: ["pattern_type"]
+            }
+        }
+    ];
+
+    const toolInstructions = `
+# TOOLS
+You can control the UI. You must answer the user's question, but if you need to perform an action, you can call a tool.
+To call a tool, you MUST use the following format exactly:
+
+<<<TOOL>>>
+{
+  "name": "tool_name",
+  "args": { ... }
+}
+<<<END>>>
+
+Available Tools (JSON Schema):
+${JSON.stringify(localToolsSchema, null, 2)}
+`;
+
+    const systemPrompt = `You are a helpful AI assistant embedded in a log analysis tool. Analyze the provided information and answer the user's questions concisely.
+# CONTEXT
+- Total logs: ${allLogs.length.toLocaleString()}
+- Available Daemons: ${daemonContextStr || 'N/A'}
+${toolInstructions}`;
+
+    let history = messages.slice(-6).reduce((acc: any[], m) => {
+        if (!m.isError && !m.isWarning && (m.role !== 'model' || !m.text.startsWith('Tool'))) {
+            const role = m.role === 'model' ? 'assistant' : m.role;
+            let cleanContent = m.text.replace(/<<<TOOL>>>[\s\S]*?<<<END>>>/g, '').trim();
+            // Handle various tag formats in cleanup
+            cleanContent = cleanContent.replace(/<<<[\w_]+>>>[\s\S]*?<<<END>>>?/g, '').trim();
+            if (cleanContent) {
+                acc.push({ role, content: cleanContent });
+            }
+        }
+        return acc;
+    }, []);
+
+    history.push({ role: 'user', content: initialPrompt });
+    
+    let turn = 0;
+    const MAX_TURNS = 10; 
+    let pendingFilterAction: FilterAction | null = null;
+
+    try {
+        while (turn < MAX_TURNS) {
+            turn++;
+            const messagesPayload = [{ role: 'system', content: systemPrompt }, ...history];
+
+            const chunks = await mlcEngine.current.chat.completions.create({
+                messages: messagesPayload,
+                stream: true,
+                temperature: 0.7
+            });
+
+            let fullText = "";
+            let uiText = ""; 
+            let isFirstChunk = true;
+            let hiddenBuffer = ""; 
+            let isCollectingTool = false;
+            
+            const messageId = Date.now().toString() + Math.random();
+            
+            for await (const chunk of chunks) {
+                const delta = chunk.choices[0]?.delta?.content || "";
+                if (delta) {
+                    fullText += delta;
+                    
+                    if (isCollectingTool) {
+                        hiddenBuffer += delta;
+                    } else {
+                        // Check for start of tool call
+                        // Check for standard tag or loose tag (e.g. <<<update_filters>>>)
+                        const lookahead = (hiddenBuffer + delta);
+                        // Improve detection for partial tag starts like "<<" or "<<<"
+                        if (delta.includes('<') || delta.includes('{') || delta.includes(':')) {
+                            // Heuristic: If we see <<< start, switch to collection mode
+                            if (lookahead.match(/<<<[\w_]*$/) || lookahead.match(/{\s*"name"/) || lookahead.match(/<<<[\w_]+>>>/)) {
+                                isCollectingTool = true;
+                                hiddenBuffer += delta; 
+                            } else {
+                                if (!isCollectingTool) {
+                                    uiText += delta;
+                                }
+                            }
+                        } else {
+                            if (!isCollectingTool) {
+                                uiText += delta;
+                            }
+                        }
+                    }
+
+                    if (uiText || isFirstChunk) { 
+                        if (isFirstChunk) {
+                            setMessages(prev => [...prev, { id: messageId, role: 'model', text: uiText, action: pendingFilterAction || undefined }]);
+                            isFirstChunk = false;
+                            if (pendingFilterAction) pendingFilterAction = null; 
+                        } else {
+                            if (!isCollectingTool) {
+                                setMessages(prev => prev.map(m => m.id === messageId ? { ...m, text: uiText } : m));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // --- Post-Generation Parsing ---
+            
+            let jsonStr = "";
+            let toolNameFromTag = "";
+
+            // 1. Try standard tag match
+            const standardMatch = fullText.match(/<<<TOOL>>>([\s\S]*?)<<<END>>>?/);
+            if (standardMatch) {
+                jsonStr = standardMatch[1];
+            } else {
+                // 2. Try tag-as-name match (e.g. <<<update_filters>>> { ... } <<<END>>>)
+                const namedTagMatch = fullText.match(/<<<(\w+)>>>([\s\S]*?)<<<END>>>?/);
+                if (namedTagMatch) {
+                    toolNameFromTag = namedTagMatch[1];
+                    jsonStr = namedTagMatch[2];
+                } else {
+                    // 3. Try raw JSON fallback
+                    const jsonMatch = fullText.match(/({[\s\S]*"name"[\s\S]*})/);
+                    if (jsonMatch) {
+                        jsonStr = jsonMatch[1];
+                    }
+                }
+            }
+            
+            // Shorthand fallback
+            const shorthandMatch = fullText.match(/:::scroll_to_log\((\d+)\):::/);
+
+            if (jsonStr) {
+                try {
+                    jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
+                    let toolCall;
+                    
+                    if (toolNameFromTag) {
+                        // If we got name from tag, the JSON is likely just the args
+                        const parsed = JSON.parse(jsonStr);
+                        // Sometimes model puts name in JSON too despite the tag, check for that
+                        if (parsed.name && !parsed.args && parsed.name === toolNameFromTag) {
+                             toolCall = parsed; // It was full tool object
+                        } else if (parsed.name && parsed.args) {
+                             toolCall = parsed; // It was full tool object, ignore tag mismatch if any
+                        } else {
+                             // It was just args
+                             toolCall = { name: toolNameFromTag, args: parsed };
+                        }
+                    } else {
+                        toolCall = JSON.parse(jsonStr);
+                    }
+
+                    // Defaults for specific tools
+                    if (toolCall.name === 'update_filters') {
+                        toolCall.args.log_levels = toolCall.args.log_levels || [];
+                        toolCall.args.daemons = toolCall.args.daemons || [];
+                        toolCall.args.search_keywords = toolCall.args.search_keywords || [];
+                        
+                        // Check if this is a suggestion vs command
+                        if (!toolCall.args.apply_immediately) {
+                            const labels = [];
+                            if (toolCall.args.log_levels?.length) labels.push(toolCall.args.log_levels.join('|'));
+                            if (toolCall.args.daemons?.length) labels.push(toolCall.args.daemons.join('|'));
+                            if (toolCall.args.search_keywords?.length) labels.push(`"${toolCall.args.search_keywords.join(' ')}"`);
+
+                            pendingFilterAction = {
+                                type: 'apply_filter',
+                                label: labels.length > 0 ? `Filter: ${labels.join(', ')}` : 'Apply Suggested Filters',
+                                payload: {
+                                    selectedLevels: toolCall.args.log_levels,
+                                    selectedDaemons: toolCall.args.daemons,
+                                    keywordQueries: toolCall.args.search_keywords,
+                                    keywordMatchMode: toolCall.args.keyword_match_mode || 'OR',
+                                }
+                            };
+                        }
+                    }
+                    if (toolCall.name === 'search_logs') {
+                        toolCall.args.keywords = toolCall.args.keywords || [];
+                        pendingFilterAction = {
+                            type: 'apply_filter',
+                            label: 'Apply Search Filters',
+                            payload: {
+                                keywordQueries: toolCall.args.keywords,
+                                keywordMatchMode: toolCall.args.match_mode || 'OR'
+                            }
+                        };
+                    }
+
+                    // Update the message with the action AND clean up any leaked tool text
+                    setMessages(prev => prev.map(m => m.id === messageId ? { 
+                        ...m, 
+                        // Strip out tool calls from display text to be safe
+                        text: m.text.replace(/<<<.*?>>>[\s\S]*?<<<END>>>?/g, '').trim(),
+                        action: pendingFilterAction || undefined 
+                    } : m));
+
+                    history.push({ role: 'assistant', content: fullText }); 
+
+                    const result = await handleToolCall(toolCall.name, toolCall.args);
+                    const resultStr = JSON.stringify(result);
+                    
+                    history.push({ role: 'user', content: `Tool Output: ${resultStr}` });
+                    continue; // Loop for next turn
+
+                } catch (e) {
+                    console.error("Local Tool Parse Error", e);
+                    break;
+                }
+            } else if (shorthandMatch) {
+                const logId = parseInt(shorthandMatch[1], 10);
+                history.push({ role: 'assistant', content: fullText });
+                const result = await handleToolCall('scroll_to_log', { log_id: logId });
+                history.push({ role: 'user', content: `Tool Output: ${JSON.stringify(result)}` });
+                continue;
+            } else {
+                break;
+            }
+        }
+    } catch (e: any) {
+        console.error("Local AI Execution Error:", e);
+        addMessage('model', `Local AI Error: ${e.message}`, true);
+    } finally {
+        setIsLoading(false);
+    }
+  }, [messages, allLogs, allDaemons, addMessage, handleToolCall]);
+
+  const loadWebLlm = useCallback(async () => {
+    setIsLoading(true);
+    setShowWebLlmConsent(false);
+    try {
+        addMessage('model', 'Initializing local model (Llama 3). This requires downloading ~2.5GB of data to your browser cache. This happens only once.', false, true);
+        
+        const engine = await CreateMLCEngine(WEB_LLM_MODEL_ID, {
+            initProgressCallback: (report) => {
+                setDownloadStatus({ text: report.text, progress: report.progress });
+            }
+        });
+        
+        mlcEngine.current = engine;
+        localStorage.setItem(WEBLMM_CONSENT_KEY, 'true');
+        addMessage('model', 'Local model loaded! Processing your request...');
+        setDownloadStatus(null); // Clear progress text after load
+        
+        if (pendingPrompt) {
+            executeLocalAI(pendingPrompt);
+            setPendingPrompt(null);
+        } else {
+            setIsLoading(false);
+        }
+    } catch (e: any) {
+        console.error("WebLLM Load Error:", e);
+        addMessage('model', `Failed to load local model: ${e.message}`, true);
+        setIsLoading(false);
+        setDownloadStatus(null);
+        setPendingPrompt(null);
+    }
+  }, [pendingPrompt, addMessage, executeLocalAI]);
+
   const runLocalAI = useCallback(async (prompt: string) => {
-    // ... (Existing Local AI logic remains here but was truncated in previous view. 
-    // Assuming it's preserved or implemented similarly if needed for full context.)
-    // For brevity in this diff, I am focusing on the Cloud AI path which is fully implemented above.
-  }, [addMessage, handleToolCall]);
+    if (mlcEngine.current) {
+        executeLocalAI(prompt);
+        return;
+    }
+
+    const hasConsented = localStorage.getItem(WEBLMM_CONSENT_KEY);
+    setPendingPrompt(prompt);
+    
+    if (hasConsented === 'true') {
+        loadWebLlm();
+    } else {
+        setShowWebLlmConsent(true);
+    }
+  }, [executeLocalAI, loadWebLlm]);
+
+  const handleConsent = (consented: boolean) => {
+      setShowWebLlmConsent(false);
+      if (consented) {
+          loadWebLlm();
+      } else {
+          setPendingPrompt(null);
+          setIsLoading(false);
+          setModelTier('gemini-2.5-flash'); // Fallback to default
+          addMessage('model', 'Switched back to Gemini 2.5 Flash.');
+      }
+  };
   
   const runChromeBuiltInAI = useCallback(async (prompt: string) => {
     if (!window.ai?.languageModel) {
-        addMessage('model', 'Chrome built-in AI is not available.', true);
+        addMessage('model', 
+            `**Chrome built-in AI is not available.**
+            
+To use this feature, you must:
+1. Use Chrome Canary or Dev channel (v127 or higher).
+2. Go to \`chrome://flags\`.
+3. Enable **"Enforce on-device model inclusion"**.
+4. Enable **"Prompt API for Gemini Nano"**.
+5. Relaunch Chrome.`, 
+            true
+        );
         setIsLoading(false);
         return;
     }
 
     try {
+        const capabilities = await window.ai.languageModel.capabilities();
+        if (capabilities.available === 'no') {
+             addMessage('model', '**Chrome AI model is not downloaded.** Please verify your browser configuration in `chrome://flags` or check internet connection.', true);
+             setIsLoading(false);
+             return;
+        }
+
         if (!chromeAiSession.current) {
             console.log('[AI] Creating new Chrome AI session.');
             const systemPrompt = `You are a helpful AI assistant embedded in a log analysis tool. Analyze the provided information and answer the user's questions concisely. You do not have tools to search or filter logs.
@@ -757,22 +1211,13 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
     }
   }, [addMessage, allLogs, allDaemons]);
 
-  const loadWebLlm = useCallback(async () => {
-    // ...
-  }, [addMessage, runLocalAI, pendingPrompt]);
-
-  const handleConsent = (consented: boolean) => {
-      // ...
-  };
-
   const getEffectiveModelTierAndRun = useCallback((prompt: string) => {
     if (modelTier === 'chrome-built-in') {
         runChromeBuiltInAI(prompt);
         return;
     }
     if (modelTier === 'web-llm') {
-        if (mlcEngine.current) runLocalAI(prompt);
-        else { /* ... consent/load logic ... */ }
+        runLocalAI(prompt);
         return;
     }
 
@@ -835,7 +1280,8 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
         'when', 'did', 'started', 'start', 'to', 'do', 'does', 'why', 'how', 'where', 'can', 'you', 'i', 'my', 'please', 'logs', 'log'
       ]);
       const extractedKeywords = prompt.toLowerCase()
-          .replace(/[^\w\s]/g, '') // Remove punctuation
+          // Retain word chars, whitespace, dots, hyphens (e.g. 192.168.1.1, my-daemon)
+          .replace(/[^\w\s\.-]/g, '') 
           .split(/\s+/)
           .filter(word => !stopWords.has(word) && word.length > 2);
       
@@ -888,7 +1334,48 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
       }
 
       const contentKeywords = extractedKeywords.filter(k => !structuralKeywords.has(k));
+      const hasLevelKeyword = extractedKeywords.some(kw => Object.keys(logIndex.levels).some(l => l.toLowerCase() === kw));
       
+      // --- Timestamp Optimization (Binary Search) ---
+      let startLogIdx = 0;
+      let endLogIdx = allLogs.length;
+
+      const dateMatch = prompt.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+      if (dateMatch) {
+          const d = new Date(dateMatch[1]);
+          if (!isNaN(d.getTime())) {
+             startLogIdx = findLogStartIndex(allLogs, d.getTime());
+             const nextDay = new Date(d);
+             nextDay.setDate(nextDay.getDate() + 1);
+             endLogIdx = findLogStartIndex(allLogs, nextDay.getTime());
+          }
+      }
+
+      // Determine scan boundaries
+      // If we have structural indices, we intersect them with the time range.
+      // If not, we just scan the time range.
+      let loopStart = 0;
+      let loopEnd = 0;
+      let useCandidates = false;
+
+      if (candidateIndices) {
+           useCandidates = true;
+           // Filter sorted candidate indices to be within [startLogIdx, endLogIdx)
+           // We use binary search on the indices array itself to find the subset quickly.
+           loopStart = lowerBound(candidateIndices, startLogIdx);
+           loopEnd = lowerBound(candidateIndices, endLogIdx);
+      } else {
+           loopStart = startLogIdx;
+           loopEnd = endLogIdx;
+      }
+      
+      const scanCount = loopEnd - loopStart;
+      const shouldScan = (scanCount > 0) && (contentKeywords.length > 0 || useCandidates || startLogIdx > 0 || endLogIdx < allLogs.length);
+      
+      if (!shouldScan) {
+           return prompt;
+      }
+
       // Combined Scanning and Grouping Loop
       const groupedLogs = new Map<string, { 
           pattern: string; 
@@ -902,96 +1389,115 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
       let matchCount = 0;
       const CHUNK_SIZE = 5000; 
 
-      const searchSpaceSize = candidateIndices ? candidateIndices.length : allLogs.length;
-      const shouldScan = contentKeywords.length > 0 || (candidateIndices !== null && candidateIndices.length > 0);
+      // Pre-calculate keyword types for weighting inside the hot loop
+      const keywordWeights = contentKeywords.map(kw => {
+          let weight = 1; // Base score
+          // If keyword matches a known daemon name (but wasn't used as a hard filter), boost it
+          if (logIndex.daemons[kw]) weight = 3; 
+          return { kw, weight };
+      });
 
-      if (shouldScan) {
-          for (let i = 0; i < searchSpaceSize; i += CHUNK_SIZE) {
-              const chunkEnd = Math.min(i + CHUNK_SIZE, searchSpaceSize);
+      for (let i = loopStart; i < loopEnd; i += CHUNK_SIZE) {
+          const chunkEnd = Math.min(i + CHUNK_SIZE, loopEnd);
+          
+          for (let j = i; j < chunkEnd; j++) {
+              const idx = useCandidates && candidateIndices ? candidateIndices[j] : j;
+              const log = allLogs[idx];
+              let score = 0;
               
-              for (let j = i; j < chunkEnd; j++) {
-                  const idx = candidateIndices ? candidateIndices[j] : j;
-                  const log = allLogs[idx];
-                  let score = 0;
+              if (contentKeywords.length > 0) {
+                  const msgLower = log.message.toLowerCase();
+                  const daemonLower = log.daemon.toLowerCase();
                   
-                  if (contentKeywords.length > 0) {
-                      const msgLower = log.message.toLowerCase();
-                      const daemonLower = log.daemon.toLowerCase();
-                      for (const kw of contentKeywords) {
-                          if (msgLower.includes(kw) || daemonLower.includes(kw) || log.level.toLowerCase().includes(kw)) {
-                              score++;
-                          }
+                  for (const { kw, weight } of keywordWeights) {
+                      if (msgLower.includes(kw) || daemonLower.includes(kw) || log.level.toLowerCase().includes(kw)) {
+                          score += weight;
                       }
-                  } else {
-                      // No content keywords, but matched structural filter (e.g. "show errors")
-                      score = 1; 
+                  }
+              } else {
+                  // No content keywords, but matched structural filter (e.g. "show errors")
+                  score = 1; 
+              }
+
+              // Severity Boost: If user didn't explicitly ask for a specific level, boost errors/criticals
+              // This ensures "what's wrong?" bubbles up errors even if query is neutral.
+              if (score > 0 && !hasLevelKeyword) {
+                  if (log.level === LogLevel.ERROR || log.level === LogLevel.CRITICAL) score += 0.5;
+                  else if (log.level === LogLevel.WARNING) score += 0.1;
+              }
+              
+              if (score > 0) {
+                  matchCount++;
+                  const pattern = getLogPattern(log.message);
+                  // Key by Pattern + Daemon + Level to differentiate similar messages from different sources
+                  const key = `${log.level}|${log.daemon}|${pattern}`;
+                  
+                  if (!groupedLogs.has(key)) {
+                      groupedLogs.set(key, {
+                          pattern,
+                          level: log.level,
+                          daemon: log.daemon,
+                          count: 0,
+                          score: 0,
+                          examples: []
+                      });
                   }
                   
-                  if (score > 0) {
-                      matchCount++;
-                      const pattern = getLogPattern(log.message);
-                      // Key by Pattern + Daemon + Level to differentiate similar messages from different sources
-                      const key = `${log.level}|${log.daemon}|${pattern}`;
-                      
-                      if (!groupedLogs.has(key)) {
-                          groupedLogs.set(key, {
-                              pattern,
-                              level: log.level,
-                              daemon: log.daemon,
-                              count: 0,
-                              score: 0,
-                              examples: []
-                          });
-                      }
-                      
-                      const group = groupedLogs.get(key)!;
-                      group.count++;
-                      group.score = Math.max(group.score, score);
-                      
-                      if (group.examples.length < 3) {
-                          group.examples.push(log.id);
-                      }
+                  const group = groupedLogs.get(key)!;
+                  group.count++;
+                  group.score = Math.max(group.score, score);
+                  
+                  if (group.examples.length < 3) {
+                      group.examples.push(log.id);
                   }
               }
-              // Yield to event loop if processing a large set
-              if (searchSpaceSize > CHUNK_SIZE) await new Promise(r => setTimeout(r, 0));
           }
+          // Yield to event loop if processing a large set
+          if (scanCount > CHUNK_SIZE) await new Promise(r => setTimeout(r, 0));
       }
 
       if (matchCount === 0) {
            return prompt;
       }
 
-      // Sort groups: High relevance (score) first, then high frequency (count)
-      const sortedGroups = Array.from(groupedLogs.values()).sort((a, b) => {
-          if (b.score !== a.score) return b.score - a.score;
-          return b.count - a.count;
+      // Sort groups by Relevance first, then heavily bias towards RARITY.
+      // High frequency logs are usually noise. Low frequency logs are usually interesting.
+      const groupsArray = Array.from(groupedLogs.values());
+      
+      // Apply Rarity Boost
+      groupsArray.forEach(g => {
+          if (g.count === 1) g.score += 3.0;
+          else if (g.count < 5) g.score += 2.0;
+          else if (g.count < 20) g.score += 1.0;
+          else if (g.count > 1000) g.score -= 1.0; // Penalty for spam
       });
 
-      // Select top groups to fit in context
-      const topGroups = sortedGroups.slice(0, 20);
+      const sortedGroups = groupsArray.sort((a, b) => {
+          // Strict score sorting (which now includes rarity bias)
+          return b.score - a.score;
+      });
+
+      // Select top groups to fit in context (increased from 20 to 30 to include more variety)
+      const topGroups = sortedGroups.slice(0, 30);
       
       const contextData = topGroups.map(g => 
-          `[Count: ${g.count}] [${g.level}] [${g.daemon}] Pattern: "${g.pattern}" (Example IDs: ${g.examples.join(', ')})`
+          `[Count: ${g.count}] [${g.level}] [${g.daemon}] Pattern: "${g.pattern}" (Example IDs: ${g.examples.map(id => `[Log ID: ${id}]`).join(', ')})`
       ).join('\n');
 
-      const preamble = `
-I have performed a local search for keywords: "${extractedKeywords.join(', ')}".
-I found ${matchCount} matching logs, grouped into ${groupedLogs.size} unique patterns.
-Here are the top ${topGroups.length} most relevant log patterns:
+      const systemNote = `
+[SYSTEM CONTEXT - LOCAL SEARCH RESULTS]
+The user's query matched ${matchCount} local logs. Here are the most relevant log groups found, prioritized by relevance and uniqueness (rarity):
 
 ${contextData}
 
----
-INSTRUCTION: 
-1. Use the log patterns provided above to answer the user's question directly.
-2. The "Count" indicates how many times this specific log appeared.
-3. Use the "Example IDs" to cite specific logs if needed (e.g. [Log ID: 123]).
-4. Do NOT call 'search_logs' for these keywords again.
-5. If you need more details, you can use 'scroll_to_log' or 'trace_error_origin' on the Example IDs.
+[INSTRUCTION]
+Use the data above to answer the user's question directly. 
+- Do NOT explicitly mention "I found log patterns" or "local search results" unless the user asks how you know.
+- Use the "Example IDs" to provide citations (e.g. [Log ID: 123]).
+- If this data is sufficient, answer the question. If not, use tools like 'search_logs' for a broader search.
 `;
       
-      return `${preamble}\n\nUser Question: "${prompt}"`;
+      return `${systemNote}\n\nUser Question: "${prompt}"`;
   }, [allLogs, addMessage, logIndex]);
 
   const handleSubmit = useCallback(async (e?: React.FormEvent, overridePrompt?: string) => {
@@ -1055,7 +1561,7 @@ INSTRUCTION:
                 <option value="gemini-flash-lite-latest">Fast</option>
                 <option value="gemini-2.5-flash">Balanced</option>
                 <option value="gemini-2.5-pro">Reasoning</option>
-                {isChromeModelAvailable && <option value="chrome-built-in">Local (Chrome)</option>}
+                <option value="chrome-built-in">Local (Chrome)</option>
                 <option value="web-llm">Local (WebLLM)</option>
             </select>
           </div>
@@ -1077,18 +1583,49 @@ INSTRUCTION:
         <div className="flex-grow p-3 overflow-y-auto space-y-4">
           {messages.map((message) => (
             <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`relative max-w-sm md:max-w-md p-2 rounded-lg text-white ${message.role === 'user' ? 'bg-blue-600' : (message.isError ? 'bg-red-800' : (message.isWarning ? 'bg-yellow-800/80' : 'bg-gray-700'))}`}>
+              <div className={`relative max-w-[85%] p-2 rounded-lg text-white ${message.role === 'user' ? 'bg-blue-600' : (message.isError ? 'bg-red-800' : (message.isWarning ? 'bg-yellow-800/80' : 'bg-gray-700'))}`}>
                  {message.role === 'model' && !message.isError && !message.isWarning && savedFindings.includes(message.text) ? (
                     <div className="absolute top-0 right-0 flex -translate-y-1/2 translate-x-1/2" title="Finding Saved"><div className="p-0.5 rounded-full bg-green-600 text-white"><svg className="w-2 h-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg></div></div>
                  ) : (message.role === 'model' && !message.isError && !message.isWarning &&
                     <button onClick={() => onSaveFinding(message.text)} className="absolute top-0 right-0 flex -translate-y-1/2 translate-x-1/2 p-0.5 rounded-full text-gray-400 bg-gray-800 border border-gray-600 hover:text-white hover:bg-gray-600" title="Save this finding"><svg className="w-2 h-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"></path></svg></button>
                  )}
                  <FormattedMessage text={message.text} onScrollToLog={onScrollToLog} />
+                 
+                 {message.action && (
+                    <div className="mt-2 pt-2 border-t border-gray-600/50">
+                        <button 
+                            onClick={() => onUpdateFilters(message.action!.payload, true)}
+                            className="flex items-center space-x-1 text-xs bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 rounded transition-colors w-full justify-center"
+                        >
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"></path></svg>
+                            <span>{message.action.label}</span>
+                        </button>
+                    </div>
+                 )}
               </div>
             </div>
           ))}
           {isLoading && (
-            <div className="flex justify-start"><div className="max-w-sm md:max-w-md p-2 rounded-lg bg-gray-700 text-white"><div className="flex items-center space-x-2 text-xs"><div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0s' }}></div><div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }}></div><div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }}></div>{downloadProgress && <span className="text-gray-400 text-[10px]">{downloadProgress}</span>}</div></div></div>
+            <div className="flex justify-start">
+                <div className="max-w-[85%] p-2 rounded-lg bg-gray-700 text-white min-w-[60px]">
+                    <div className="flex items-center space-x-2 text-xs mb-1">
+                        <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0s' }}></div>
+                        <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }}></div>
+                        <div className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }}></div>
+                    </div>
+                    {downloadStatus && (
+                         <div className="w-full">
+                             <div className="text-[9px] text-gray-400 mb-1 truncate">{downloadStatus.text}</div>
+                             <div className="w-full bg-gray-600 rounded-full h-1">
+                                <div 
+                                    className="bg-blue-500 h-1 rounded-full transition-all duration-300 ease-out" 
+                                    style={{ width: `${Math.round(downloadStatus.progress * 100)}%` }}
+                                ></div>
+                             </div>
+                         </div>
+                    )}
+                </div>
+            </div>
           )}
           <div ref={messagesEndRef} />
         </div>
@@ -1147,6 +1684,32 @@ INSTRUCTION:
                     <div className="flex justify-end space-x-2">
                         <button onClick={() => setIsSettingsOpen(false)} className="bg-gray-600 text-white px-3 py-1 rounded text-xs hover:bg-gray-700">Cancel</button>
                         <button onClick={handleSaveSettings} className="bg-blue-600 text-white px-3 py-1 rounded text-xs hover:bg-blue-700">Save</button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {showWebLlmConsent && (
+            <div className="absolute inset-0 bg-black/80 z-20 flex items-center justify-center p-4">
+                <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full border border-gray-700 text-center">
+                    <h3 className="text-xl font-bold text-white mb-2">Download Local AI Model?</h3>
+                    <p className="text-sm text-gray-300 mb-4">
+                        To run the AI locally on your device, we need to download the Llama 3 model weights (~2.5GB). 
+                        This happens only once and is stored in your browser cache.
+                    </p>
+                    <div className="flex justify-center space-x-4">
+                        <button 
+                            onClick={() => handleConsent(false)}
+                            className="px-4 py-2 rounded bg-gray-600 hover:bg-gray-500 text-white text-sm"
+                        >
+                            Cancel
+                        </button>
+                        <button 
+                            onClick={() => handleConsent(true)}
+                            className="px-4 py-2 rounded bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium"
+                        >
+                            Download & Run
+                        </button>
                     </div>
                 </div>
             </div>

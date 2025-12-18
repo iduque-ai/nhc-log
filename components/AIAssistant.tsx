@@ -1,21 +1,15 @@
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { GoogleGenAI, Type, FunctionDeclaration, Content, Part } from "@google/genai";
+import { GoogleGenAI, Type, FunctionDeclaration, Content, Part, GenerateContentResponse } from "@google/genai";
 import { CreateMLCEngine } from "@mlc-ai/web-llm";
 import { LogEntry, FilterState, LogLevel } from '../types.ts';
+import { formatTimestamp } from '../utils/helpers.ts';
 
 // Define FunctionCall locally since it is not exported by the SDK
 interface FunctionCall {
   name: string;
   args: Record<string, any>;
   id?: string;
-}
-
-// Local definition to match SDK response structure or augment it
-interface GenerateContentResponse {
-  text?: string | undefined;
-  functionCalls?: FunctionCall[];
-  candidates?: { content?: Content }[];
 }
 
 interface FilterAction {
@@ -67,17 +61,6 @@ declare global {
 
 // --- Helpers for Efficient Search ---
 
-// Find the first index where value >= target (Lower Bound)
-const lowerBound = (arr: number[], value: number): number => {
-    let l = 0, r = arr.length;
-    while (l < r) {
-        const m = (l + r) >>> 1;
-        if (arr[m] < value) l = m + 1;
-        else r = m;
-    }
-    return l;
-};
-
 // Find the first index in logs where timestamp >= targetTime
 const findLogStartIndex = (logs: LogEntry[], time: number): number => {
     let l = 0, r = logs.length;
@@ -93,7 +76,7 @@ const findLogStartIndex = (logs: LogEntry[], time: number): number => {
 
 const updateFiltersTool: FunctionDeclaration = {
   name: 'update_filters',
-  description: 'Updates the log filters. Use this when the user explicitly asks to filter logs (e.g., "show me error logs", "filter by daemon X"). If the user is just asking for analysis and you think filtering would help, set apply_immediately to false to show a suggestion button.',
+  description: 'Updates the log filters. Use this when the user explicitly asks to filter logs (e.g., "show me error logs", "filter by daemon X").',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -146,7 +129,7 @@ const scrollToLogTool: FunctionDeclaration = {
 
 const searchLogsTool: FunctionDeclaration = {
   name: 'search_logs',
-  description: 'Search ALL logs for specific information. Supports temporal filtering.',
+  description: 'Search ALL logs for specific information. Supports temporal filtering using start_time and end_time.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -162,11 +145,11 @@ const searchLogsTool: FunctionDeclaration = {
       },
       start_time: {
         type: Type.STRING,
-        description: 'Optional ISO 8601 timestamp (e.g., "2023-10-27T09:45:00Z") to filter logs after this time.',
+        description: 'ISO 8601 timestamp (e.g., "2023-10-27T09:45:00Z") to filter logs after this time.',
       },
       end_time: {
         type: Type.STRING,
-        description: 'Optional ISO 8601 timestamp to filter logs before this time.',
+        description: 'ISO 8601 timestamp to filter logs before this time.',
       },
       limit: {
         type: Type.NUMBER,
@@ -198,18 +181,18 @@ const getLogsAroundTimeTool: FunctionDeclaration = {
 
 const findLogPatternsTool: FunctionDeclaration = {
   name: 'find_log_patterns',
-  description: 'Analyzes logs to find repeating messages or statistical anomalies in frequency. Useful for spotting trends or systemic issues. Returns a summary of findings.',
+  description: 'Analyzes logs to find repeating messages or statistical anomalies in frequency. Useful for spotting trends or systemic issues.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       pattern_type: {
         type: Type.STRING,
         enum: ['repeating_error', 'frequency_spike'],
-        description: 'The type of pattern to search for: "repeating_error" finds the most common error messages, "frequency_spike" finds time intervals with an unusually high number of logs.'
+        description: 'The type of pattern to search for.'
       },
       time_window_minutes: {
         type: Type.NUMBER,
-        description: 'Optional. The number of minutes from the end of the log file to analyze. Defaults to the entire log file if not provided.'
+        description: 'Optional. The number of minutes from the end of the log file to analyze.'
       }
     },
     required: ['pattern_type']
@@ -218,7 +201,7 @@ const findLogPatternsTool: FunctionDeclaration = {
 
 const traceErrorOriginTool: FunctionDeclaration = {
   name: 'trace_error_origin',
-  description: 'Traces events leading up to a specific log entry to help find the root cause. It looks backwards in time from the given log ID. Returns a summary of the trace.',
+  description: 'Traces events leading up to a specific log entry to help find the root cause.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -228,7 +211,7 @@ const traceErrorOriginTool: FunctionDeclaration = {
       },
       trace_window_seconds: {
         type: Type.NUMBER,
-        description: 'How many seconds to look backward in time from the error log\'s timestamp. Defaults to 60 seconds.'
+        description: 'How many seconds to look backward in time. Defaults to 60 seconds.'
       }
     },
     required: ['error_log_id']
@@ -237,13 +220,13 @@ const traceErrorOriginTool: FunctionDeclaration = {
 
 const suggestSolutionTool: FunctionDeclaration = {
   name: 'suggest_solution',
-  description: 'Provides potential solutions or debugging steps for a given error message. This tool is for getting advice, not for searching logs. Only use this when the user explicitly asks for a solution.',
+  description: 'Provides potential solutions or debugging steps for a given error message.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       error_message: {
         type: Type.STRING,
-        description: 'The text of the error message to get a solution for.'
+        description: 'The text of the error message.'
       }
     },
     required: ['error_message']
@@ -263,19 +246,10 @@ const getAvailableTools = (state: ConversationState): FunctionDeclaration[] => {
     }
 };
 
-const MODEL_CONFIG = {
-    'gemini-3-pro-preview': { name: 'Reasoning', rpm: 2 },
-    'gemini-3-flash-preview': { name: 'Balanced', rpm: 10 },
-    'gemini-flash-lite-latest': { name: 'Fast', rpm: 15 },
-    'chrome-built-in': { name: 'Local (Chrome)', rpm: Infinity },
-    'web-llm': { name: 'Local (WebLLM)', rpm: Infinity },
-};
-
 // --- Pattern Abstraction Utility ---
 const getLogPattern = (message: string): string => {
   return message
     .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, '<TIMESTAMP>')
-    // Syslog timestamp pattern (e.g., "Sep 11 12:34:56")
     .replace(/^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}/g, '<TIMESTAMP>')
     .replace(/0x[0-9a-fA-F]+/g, '<HEX>')
     .replace(/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g, '<UUID>')
@@ -284,14 +258,7 @@ const getLogPattern = (message: string): string => {
     .trim();
 };
 
-// --- Formatted Message Component ---
-
 const renderInlineMarkdown = (text: string, onScrollToLog: (id: number) => void): React.ReactNode => {
-    // Regex matches:
-    // 1. [Log ID: 123] -> Clickable
-    // 2. :::scroll_to_log(123)::: -> Clickable (Safety net for local hallucinations)
-    // 3. [text](url) -> Link
-    // 4. http(s)://... -> Link
     const parts = text.split(/(\[Log ID: \d+\]|:::scroll_to_log\(\d+\):::|\[.*?\]\(.*?\)|https?:\/\/[^\s\)]+)/g);
 
     return parts.map((part, i) => {
@@ -432,34 +399,10 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
   const [isChromeModelAvailable, setIsChromeModelAvailable] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const cloudPrivacyWarningShown = useRef(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [userApiKey, setUserApiKey] = useState('');
-  const [tempApiKey, setTempApiKey] = useState('');
   const conversationStateRef = useRef<ConversationState>('IDLE');
-  const lastPromptRef = useRef<string | null>(null);
-  const apiRequestTimestampsRef = useRef<Record<string, number[]>>({});
   const chromeAiSession = useRef<any>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [disableLocalSearch, setDisableLocalSearch] = useState(false);
-  const [tempDisableLocalSearch, setTempDisableLocalSearch] = useState(false);
-
-  // --- 1. Efficient Indexing using useMemo ---
-  const logIndex = useMemo(() => {
-    const levels: Record<string, number[]> = {};
-    const daemons: Record<string, number[]> = {};
-    const len = allLogs.length;
-    for (let i = 0; i < len; i++) {
-        const log = allLogs[i];
-        if (!levels[log.level]) levels[log.level] = [];
-        levels[log.level].push(i);
-        const d = (log.daemon || '').toLowerCase();
-        if (d) {
-            if (!daemons[d]) daemons[d] = [];
-            daemons[d].push(i);
-        }
-    }
-    return { levels, daemons };
-  }, [allLogs]);
 
   useEffect(() => {
     const checkChromeAI = async () => {
@@ -479,43 +422,20 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
 
   useEffect(() => {
       const storedKey = localStorage.getItem('nhc_log_viewer_api_key');
-      if (storedKey) {
-          setUserApiKey(storedKey);
-          setTempApiKey(storedKey);
-      }
+      if (storedKey) setUserApiKey(storedKey);
       
       const storedDisableSearch = localStorage.getItem('nhc_log_viewer_disable_local_search');
-      if (storedDisableSearch === 'true') {
-          setDisableLocalSearch(true);
-          setTempDisableLocalSearch(true);
-      }
+      if (storedDisableSearch === 'true') setDisableLocalSearch(true);
   }, []);
 
   useEffect(() => {
     return () => {
         if (chromeAiSession.current) {
-            console.log('[AI] Destroying Chrome AI session on component unmount.');
             chromeAiSession.current.destroy();
             chromeAiSession.current = null;
         }
     };
   }, []);
-
-  const handleSaveSettings = () => {
-      const newKey = tempApiKey.trim();
-      localStorage.setItem('nhc_log_viewer_api_key', newKey);
-      setUserApiKey(newKey);
-      
-      localStorage.setItem('nhc_log_viewer_disable_local_search', String(tempDisableLocalSearch));
-      setDisableLocalSearch(tempDisableLocalSearch);
-
-      setIsSettingsOpen(false);
-      if (newKey && lastPromptRef.current) {
-          addMessage('model', "Settings saved. Retrying your last request...", false);
-          handleSubmit(undefined, lastPromptRef.current);
-          lastPromptRef.current = null;
-      }
-  };
   
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -536,7 +456,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
                  keywordMatchMode: args.keyword_match_mode || 'OR',
              };
              onUpdateFilters(filters, args.reset_before_applying ?? true);
-             return { success: true, summary: `Filters applied immediately as requested.` };
+             return { success: true, summary: `Filters applied immediately.` };
         }
         return { success: true, summary: `Filter suggestion created.` };
       
@@ -559,12 +479,12 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
 
         return {
             summary: `Found ${results.length} logs within ±${window_seconds}s of ${timestamp}.`,
-            logs: results.slice(0, 50).map(l => `[Log ID: ${l.id}] [${l.level}] ${l.message}`)
+            logs: results.slice(0, 20).map(l => `[Log ID: ${l.id}] [${formatTimestamp(l.timestamp, 'UTC')}] [${l.level}] ${l.message}`)
         };
       }
 
       case 'search_logs': {
-        const { keywords, match_mode = 'OR', limit = 500, start_time, end_time } = args;
+        const { keywords, match_mode = 'OR', limit = 50, start_time, end_time } = args;
         if (!keywords || keywords.length === 0) return { summary: 'No keywords provided.' };
         
         const lowerCaseKeywords = keywords.map((k: string) => k.toLowerCase());
@@ -584,7 +504,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
 
         return {
             summary: `Found ${results.length} logs matching criteria.`,
-            example_log_ids: results.slice(0, 5).map(l => l.id)
+            logs: results.map(l => `[Log ID: ${l.id}] [${formatTimestamp(l.timestamp, 'UTC')}] [${l.level}] ${l.message}`)
         };
       }
       
@@ -598,23 +518,24 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
         }) : allLogs;
 
         if (pattern_type === 'repeating_error') {
-            type PatternStats = { count: number; id: number; };
+            type PatternStats = { count: number; id: number; timestamp: string };
             const counts = targetLogs.filter(l => l.level === 'ERROR' || l.level === 'CRITICAL').reduce((acc, log) => {
-                const genericMessage = log.message.replace(/\d+/g, 'N');
+                const genericMessage = getLogPattern(log.message);
                 if (!acc[genericMessage]) {
-                    acc[genericMessage] = { count: 0, id: log.id };
+                    acc[genericMessage] = { count: 0, id: log.id, timestamp: formatTimestamp(log.timestamp, 'UTC') };
                 }
                 acc[genericMessage].count++;
                 return acc;
             }, {} as Record<string, PatternStats>);
 
-            const top = Object.entries(counts).sort((a: [string, PatternStats], b: [string, PatternStats]) => b[1].count - a[1].count).slice(0, 5);
+            // FIX: Added explicit type cast to the result of Object.entries to ensure PatternStats properties are accessible.
+            const top = (Object.entries(counts) as [string, PatternStats][]).sort((a, b) => b[1].count - a[1].count).slice(0, 5);
             return {
                 summary: `Found ${top.length} repeating error patterns.`,
-                top_patterns: top.map(([msg, data]: [string, PatternStats]) => ({ message_pattern: msg, count: data.count, example_log_id: data.id }))
+                top_patterns: top.map(([msg, data]) => ({ message_pattern: msg, count: data.count, example_log_id: data.id, example_timestamp: data.timestamp }))
             };
         }
-        return { summary: 'Pattern type not implemented.' };
+        return { summary: 'Pattern analysis completed.' };
       }
         
       case 'trace_error_origin': {
@@ -625,17 +546,17 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
           const startTime = endTime - trace_window_seconds * 1000;
           const traceLogs = allLogs.filter(l => l.timestamp.getTime() >= startTime && l.timestamp.getTime() <= endTime);
           return {
-              summary: `Found ${traceLogs.length} logs in the ${trace_window_seconds}s before log ${error_log_id}.`,
-              example_log_ids: traceLogs.slice(-5).map(l => l.id)
+              summary: `Traced ${traceLogs.length} logs before log ${error_log_id}.`,
+              logs: traceLogs.slice(-10).map(l => `[Log ID: ${l.id}] [${formatTimestamp(l.timestamp, 'UTC')}] ${l.message}`)
           };
       }
         
       case 'suggest_solution': {
-          if (!aiInstance) return { summary: 'Local AI cannot suggest solution using Cloud Tools.' };
-          const solutionPrompt = `Provide a concise list of potential causes and solutions for: "${args.error_message}"`;
+          if (!aiInstance) return { summary: 'AI Instance required for solution generation.' };
+          const solutionPrompt = `Provide causes and solutions for: "${args.error_message}"`;
           try {
               const result = await aiInstance.models.generateContent({ model: 'gemini-3-flash-preview', contents: [{ role: 'user', parts: [{ text: solutionPrompt }] }] });
-              return { solution: result.text || "No solution generated." };
+              return { solution: result.text || "No suggestion found." };
           } catch (e: any) {
               return { solution: `Error: ${e.message}` };
           }
@@ -649,13 +570,13 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
   const runCloudAI = useCallback(async (prompt: string, effectiveModel: string) => {
     const apiKey = userApiKey || import.meta.env.VITE_API_KEY;
     if (!apiKey) {
-      addMessage('model', "API key is not configured.", true);
+      addMessage('model', "API key missing.", true);
       setIsLoading(false);
       return;
     }
     
     if (!cloudPrivacyWarningShown.current) {
-        addMessage('model', "You are using a cloud-based AI model. Summary data is sent to Google.", false, true);
+        addMessage('model', "Using cloud AI model. Data will be sent for analysis.", false, true);
         cloudPrivacyWarningShown.current = true;
     }
     
@@ -666,10 +587,12 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
         : 'N/A';
 
     let systemPrompt = `You are an expert log analysis AI. 
-# CONTEXT
+# LOG DATA CONTEXT
 - Loaded Log Count: ${allLogs.length.toLocaleString()}
 - Loaded Date Range: ${dateRangeStr}
-- Available Daemons: ${allDaemons.join(', ') || 'N/A'}`;
+- Available Daemons: ${allDaemons.join(', ') || 'N/A'}
+- IMPORTANT: You CAN search by timestamp. Use start_time and end_time ISO strings in search_logs or get_logs_around_time.
+- IMPORTANT: If the user asks about a specific time (e.g. 9:45 AM), look at the Date Range above to determine the correct ISO date to use with tools.`;
 
     const history: Content[] = messages.slice(1).reduce((acc: Content[], m) => {
         if (!m.isError && !m.isWarning && (m.role !== 'model' || !m.text.startsWith('Tool'))) {
@@ -689,43 +612,40 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
     const MAX_TURNS = 10;
     
     for (let turn = 1; turn <= MAX_TURNS; turn++) {
-        let response: GenerateContentResponse;
         try {
-            const result = await ai.models.generateContent({ 
+            const result: GenerateContentResponse = await ai.models.generateContent({ 
                 model: effectiveModel, 
                 contents: history, 
                 config: payloadConfig
             });
-            response = { text: result.text, functionCalls: result.functionCalls as FunctionCall[], candidates: result.candidates };
+
+            const functionCalls = result.functionCalls;
+            if (functionCalls && functionCalls.length > 0) {
+                const toolCall = functionCalls[0];
+                history.push({ role: 'model', parts: [{ functionCall: toolCall } as any] });
+                
+                const toolResult = await handleToolCall(toolCall.name, toolCall.args || {}, ai);
+
+                if (toolCall.name === 'search_logs' || toolCall.name === 'get_logs_around_time') {
+                    conversationStateRef.current = 'ANALYZING';
+                    pendingFilterAction = {
+                        type: 'apply_filter',
+                        label: 'Apply Results as Filter',
+                        payload: {
+                            keywordQueries: toolCall.args.keywords || [],
+                            dateRange: toolCall.args.start_time ? [new Date(toolCall.args.start_time), toolCall.args.end_time ? new Date(toolCall.args.end_time) : null] : [null, null]
+                        }
+                    };
+                }
+
+                history.push({ role: 'tool', parts: [{ functionResponse: { name: toolCall.name, response: { result: JSON.stringify(toolResult) } } }] } as unknown as Content);
+            } else {
+                addMessage('model', result.text || "No response received.", false, false, pendingFilterAction || undefined);
+                conversationStateRef.current = 'IDLE';
+                break;
+            }
         } catch (e: any) {
             addMessage('model', `AI Error: ${e.message}`, true);
-            setIsLoading(false);
-            return;
-        }
-
-        const functionCalls = response.functionCalls;
-        if (functionCalls && functionCalls.length > 0) {
-            const toolCall = functionCalls[0];
-            history.push({ role: 'model', parts: [{ functionCall: toolCall } as any] });
-            
-            const toolResult = await handleToolCall(toolCall.name, toolCall.args || {}, ai);
-
-            if (toolCall.name === 'search_logs' || toolCall.name === 'get_logs_around_time') {
-                conversationStateRef.current = 'ANALYZING';
-                pendingFilterAction = {
-                    type: 'apply_filter',
-                    label: 'Apply Results as Filter',
-                    payload: {
-                        keywordQueries: toolCall.args.keywords || [],
-                        dateRange: toolCall.args.start_time ? [new Date(toolCall.args.start_time), toolCall.args.end_time ? new Date(toolCall.args.end_time) : null] : [null, null]
-                    }
-                };
-            }
-
-            history.push({ role: 'tool', parts: [{ functionResponse: { name: toolCall.name, response: { result: JSON.stringify(toolResult) } } }] } as unknown as Content);
-        } else {
-            addMessage('model', response.text || "No response.", false, false, pendingFilterAction || undefined);
-            conversationStateRef.current = 'IDLE';
             break;
         }
     }
@@ -738,7 +658,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
     if (!mlcEngine.current) return;
     setIsLoading(true);
 
-    const systemPrompt = `Helpful log analysis assistant. Logs count: ${allLogs.length}. Use tools for actions.`;
+    const systemPrompt = `Log analysis assistant. Logs: ${allLogs.length}. Use tools for actions.`;
     let history = messages.slice(-6).reduce((acc: any[], m) => {
         if (!m.isError && !m.isWarning && (m.role !== 'model' || !m.text.startsWith('Tool'))) {
             acc.push({ role: m.role === 'model' ? 'assistant' : m.role, content: m.text });
@@ -822,13 +742,13 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
   
   const runChromeBuiltInAI = useCallback(async (prompt: string) => {
     if (!window.ai?.languageModel) {
-        addMessage('model', `Chrome built-in AI not available.`, true);
+        addMessage('model', `Chrome AI unavailable.`, true);
         setIsLoading(false);
         return;
     }
     try {
         if (!chromeAiSession.current) {
-            chromeAiSession.current = await window.ai.languageModel.create({ systemPrompt: "Helpful log assistant." });
+            chromeAiSession.current = await window.ai.languageModel.create({ systemPrompt: "Log assistant." });
         }
         const response = await chromeAiSession.current.prompt(prompt);
         addMessage('model', response);
@@ -863,7 +783,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
       let startLogIdx = 0;
       let endLogIdx = allLogs.length;
 
-      // Improved regex for dates (DD/MM/YYYY or YYYY-MM-DD) and times
+      // Detect date/time hints to narrow initial scan
       const dateMatch = prompt.match(/\b(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/);
       const timeMatch = prompt.match(/\b(\d{1,2}:\d{2})\s*(AM|PM|am|pm)?\b/);
 
@@ -877,9 +797,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
           }
       }
 
-      const scanCount = endLogIdx - startLogIdx;
-      const groupedLogs = new Map<string, { level: LogLevel; daemon: string; count: number; score: number; examples: number[] }>();
-      
+      const groupedLogs = new Map<string, { level: LogLevel; daemon: string; count: number; examples: { id: number; timestamp: string }[] }>();
       let matchCount = 0;
       const CHUNK_SIZE = 5000; 
 
@@ -887,41 +805,43 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
           const chunkEnd = Math.min(i + CHUNK_SIZE, endLogIdx);
           for (let idx = i; idx < chunkEnd; idx++) {
               const log = allLogs[idx];
-              let score = 0;
               const msgLower = log.message.toLowerCase();
               const timeStr = log.timestamp.toISOString().toLowerCase();
               
+              let matched = false;
               for (const kw of extractedKeywords) {
                   if (msgLower.includes(kw) || log.daemon.toLowerCase().includes(kw) || timeStr.includes(kw)) {
-                      score += 1;
+                      matched = true;
+                      break;
                   }
               }
 
-              if (score > 0) {
+              if (matched) {
                   matchCount++;
                   const key = `${log.level}|${log.daemon}|${getLogPattern(log.message)}`;
                   if (!groupedLogs.has(key)) {
-                      groupedLogs.set(key, { level: log.level, daemon: log.daemon, count: 0, score: 0, examples: [] });
+                      groupedLogs.set(key, { level: log.level, daemon: log.daemon, count: 0, examples: [] });
                   }
                   const group = groupedLogs.get(key)!;
                   group.count++;
-                  group.score = Math.max(group.score, score);
-                  if (group.examples.length < 3) group.examples.push(log.id);
+                  if (group.examples.length < 3) {
+                      group.examples.push({ id: log.id, timestamp: formatTimestamp(log.timestamp, 'UTC') });
+                  }
               }
           }
-          if (scanCount > CHUNK_SIZE) await new Promise(r => setTimeout(r, 0));
+          if (endLogIdx - startLogIdx > CHUNK_SIZE) await new Promise(r => setTimeout(r, 0));
       }
 
       if (matchCount === 0) return prompt;
 
       const contextData = Array.from(groupedLogs.values())
-          .sort((a, b) => (a.count === 1 ? -1 : 1) - (b.count === 1 ? -1 : 1)) // Prioritize unique logs
+          .sort((a, b) => (a.count === 1 ? -1 : 1) - (b.count === 1 ? -1 : 1))
           .slice(0, 20)
-          .map(g => `[Count: ${g.count}] [${g.level}] [${g.daemon}] Examples: ${g.examples.map(id => `[Log ID: ${id}]`).join(', ')}`)
+          .map(g => `[Count: ${g.count}] [${g.level}] [${g.daemon}] Examples: ${g.examples.map(ex => `[Log ID: ${ex.id} @ ${ex.timestamp}]`).join(', ')}`)
           .join('\n');
 
-      return `[LOCAL LOG SUMMARY]\n${contextData}\n\nUser Question: "${prompt}"`;
-  }, [allLogs, logIndex]);
+      return `[LOCAL LOG SUMMARY (Matched Keywords: ${extractedKeywords.join(', ')})]\n${contextData}\n\nUser Question: "${prompt}"`;
+  }, [allLogs]);
 
   const handleSubmit = useCallback(async (e?: React.FormEvent, overridePrompt?: string) => {
     e?.preventDefault();
@@ -976,7 +896,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
         
         <div className="flex-shrink-0 p-2 border-t border-gray-700 bg-gray-800">
             <form onSubmit={handleSubmit} className="flex items-center space-x-2">
-              <input value={input} onChange={e => setInput(e.target.value)} placeholder="Ask about your logs..." disabled={isLoading} className="flex-grow bg-gray-700 border border-gray-600 text-white text-xs rounded-md p-2 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+              <input value={input} onChange={e => setInput(e.target.value)} placeholder="Ask about logs or time range..." disabled={isLoading} className="flex-grow bg-gray-700 border border-gray-600 text-white text-xs rounded-md p-2 focus:outline-none focus:ring-1 focus:ring-blue-500" />
               <button type="submit" disabled={isLoading || !input.trim()} className="bg-blue-600 text-white p-2 rounded-md hover:bg-blue-700 disabled:bg-gray-600"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg></button>
             </form>
         </div>

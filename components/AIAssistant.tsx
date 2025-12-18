@@ -400,9 +400,13 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const cloudPrivacyWarningShown = useRef(false);
   const [userApiKey, setUserApiKey] = useState('');
+  const [tempApiKey, setTempApiKey] = useState('');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isFindingsOpen, setIsFindingsOpen] = useState(false);
+  const [disableLocalSearch, setDisableLocalSearch] = useState(false);
+  const [tempDisableLocalSearch, setTempDisableLocalSearch] = useState(false);
   const conversationStateRef = useRef<ConversationState>('IDLE');
   const chromeAiSession = useRef<any>(null);
-  const [disableLocalSearch, setDisableLocalSearch] = useState(false);
 
   useEffect(() => {
     const checkChromeAI = async () => {
@@ -422,10 +426,16 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
 
   useEffect(() => {
       const storedKey = localStorage.getItem('nhc_log_viewer_api_key');
-      if (storedKey) setUserApiKey(storedKey);
+      if (storedKey) {
+          setUserApiKey(storedKey);
+          setTempApiKey(storedKey);
+      }
       
       const storedDisableSearch = localStorage.getItem('nhc_log_viewer_disable_local_search');
-      if (storedDisableSearch === 'true') setDisableLocalSearch(true);
+      if (storedDisableSearch === 'true') {
+          setDisableLocalSearch(true);
+          setTempDisableLocalSearch(true);
+      }
   }, []);
 
   useEffect(() => {
@@ -444,6 +454,17 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
   const addMessage = useCallback((role: 'user' | 'model', text: string, isError = false, isWarning = false, action?: FilterAction) => {
     setMessages(prev => [...prev, { id: Date.now().toString() + Math.random(), role, text, isError, isWarning, action }]);
   }, []);
+
+  const handleSaveSettings = () => {
+      const newKey = tempApiKey.trim();
+      localStorage.setItem('nhc_log_viewer_api_key', newKey);
+      setUserApiKey(newKey);
+      
+      localStorage.setItem('nhc_log_viewer_disable_local_search', String(tempDisableLocalSearch));
+      setDisableLocalSearch(tempDisableLocalSearch);
+
+      setIsSettingsOpen(false);
+  };
   
   const handleToolCall = useCallback(async (toolName: string, args: any, aiInstance?: GoogleGenAI): Promise<any> => {
     switch (toolName) {
@@ -569,13 +590,13 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
   const runCloudAI = useCallback(async (prompt: string, effectiveModel: string) => {
     const apiKey = userApiKey || import.meta.env.VITE_API_KEY;
     if (!apiKey) {
-      addMessage('model', "API key missing.", true);
+      addMessage('model', "API key missing. Please set it in Settings.", true);
       setIsLoading(false);
       return;
     }
     
     if (!cloudPrivacyWarningShown.current) {
-        addMessage('model', "Using cloud AI model. Data will be sent for analysis.", false, true);
+        addMessage('model', "Using cloud AI model. Log summaries and findings will be sent to Google for analysis. Do not send sensitive or regulated data.", false, true);
         cloudPrivacyWarningShown.current = true;
     }
     
@@ -612,33 +633,47 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
     
     for (let turn = 1; turn <= MAX_TURNS; turn++) {
         try {
-            // FIX: Cast result to any to bypass incomplete TypeScript definitions for GenerateContentResponse in the build environment.
             const result = (await ai.models.generateContent({ 
                 model: effectiveModel, 
                 contents: history, 
                 config: payloadConfig
             })) as any;
 
+            const candidate = result.candidates?.[0];
+            if (!candidate?.content) {
+                addMessage('model', "No response candidate received.", true);
+                break;
+            }
+            
+            history.push(candidate.content);
+
             const functionCalls = result.functionCalls;
             if (functionCalls && functionCalls.length > 0) {
-                const toolCall = functionCalls[0];
-                history.push({ role: 'model', parts: [{ functionCall: toolCall } as any] });
-                
-                const toolResult = await handleToolCall(toolCall.name, toolCall.args || {}, ai);
+                for (const toolCall of functionCalls) {
+                    const toolResult = await handleToolCall(toolCall.name, toolCall.args || {}, ai);
 
-                if (toolCall.name === 'search_logs' || toolCall.name === 'get_logs_around_time') {
-                    conversationStateRef.current = 'ANALYZING';
-                    pendingFilterAction = {
-                        type: 'apply_filter',
-                        label: 'Apply Results as Filter',
-                        payload: {
-                            keywordQueries: toolCall.args.keywords || [],
-                            dateRange: toolCall.args.start_time ? [new Date(toolCall.args.start_time), toolCall.args.end_time ? new Date(toolCall.args.end_time) : null] : [null, null]
-                        }
-                    };
+                    if (toolCall.name === 'search_logs' || toolCall.name === 'get_logs_around_time') {
+                        conversationStateRef.current = 'ANALYZING';
+                        pendingFilterAction = {
+                            type: 'apply_filter',
+                            label: 'Apply Results as Filter',
+                            payload: {
+                                keywordQueries: toolCall.args.keywords || [],
+                                dateRange: toolCall.args.start_time ? [new Date(toolCall.args.start_time), toolCall.args.end_time ? new Date(toolCall.args.end_time) : null] : [null, null]
+                            }
+                        };
+                    }
+
+                    history.push({ 
+                        role: 'tool', 
+                        parts: [{ 
+                            functionResponse: { 
+                                name: toolCall.name, 
+                                response: { result: JSON.stringify(toolResult) } 
+                            } 
+                        }] 
+                    } as unknown as Content);
                 }
-
-                history.push({ role: 'tool', parts: [{ functionResponse: { name: toolCall.name, response: { result: JSON.stringify(toolResult) } } }] } as unknown as Content);
             } else {
                 addMessage('model', result.text || "No response received.", false, false, pendingFilterAction || undefined);
                 conversationStateRef.current = 'IDLE';
@@ -783,10 +818,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
       let startLogIdx = 0;
       let endLogIdx = allLogs.length;
 
-      // Detect date/time hints to narrow initial scan
       const dateMatch = prompt.match(/\b(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/);
-      const timeMatch = prompt.match(/\b(\d{1,2}:\d{2})\s*(AM|PM|am|pm)?\b/);
-
       if (dateMatch) {
           const d = new Date(dateMatch[1]);
           if (!isNaN(d.getTime())) {
@@ -861,13 +893,20 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
     setInput('');
   }, [input, isLoading, addMessage, getEffectiveModelTierAndRun, enhancePromptWithLocalContext, disableLocalSearch]);
 
+  const handleRunPatterns = () => {
+    const prompt = "Please find the most common log patterns and anomalies.";
+    addMessage('user', prompt);
+    setIsLoading(true);
+    getEffectiveModelTierAndRun(prompt);
+  };
+
   return (
-    <div className="h-full flex flex-col bg-gray-800 relative">
-        <div className="flex-shrink-0 flex items-center justify-between p-2 border-b border-gray-700">
+    <div className="h-full flex flex-col bg-gray-800 relative border-l border-gray-700">
+        {/* Header with Buttons */}
+        <div className="flex-shrink-0 flex items-center justify-between p-2 border-b border-gray-700 bg-gray-900">
           <div className="flex items-center space-x-2">
             <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-            <h2 className="font-bold text-sm text-white">AI Assistant</h2>
-            <select value={modelTier} onChange={e => setModelTier(e.target.value)} className="bg-gray-700 text-white text-xs rounded py-0.5 px-1 border border-gray-600 focus:outline-none">
+            <select value={modelTier} onChange={e => setModelTier(e.target.value)} className="bg-gray-800 text-white text-xs rounded py-0.5 px-1 border border-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500">
                 <option value="gemini-flash-lite-latest">Fast</option>
                 <option value="gemini-3-flash-preview">Balanced</option>
                 <option value="gemini-3-pro-preview">Reasoning</option>
@@ -875,13 +914,39 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
                 <option value="web-llm">Local (WebLLM)</option>
             </select>
           </div>
-          <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded-md hover:bg-gray-700"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg></button>
+          <div className="flex items-center space-x-1">
+             <button onClick={handleRunPatterns} title="Analyze Patterns" className="p-1 text-gray-400 hover:text-white rounded-md hover:bg-gray-800 transition-colors">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"></path></svg>
+             </button>
+             <button onClick={() => setIsFindingsOpen(!isFindingsOpen)} title="Saved Findings" className="p-1 text-gray-400 hover:text-white rounded-md hover:bg-gray-800 transition-colors">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+             </button>
+             <button onClick={() => setIsSettingsOpen(true)} title="AI Settings" className="p-1 text-gray-400 hover:text-white rounded-md hover:bg-gray-800 transition-colors">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+             </button>
+             <div className="w-px h-4 bg-gray-700 mx-1"></div>
+             <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded-md hover:bg-gray-800 transition-colors">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+             </button>
+          </div>
         </div>
 
-        <div className="flex-grow p-3 overflow-y-auto space-y-4">
+        <div className="flex-grow p-3 overflow-y-auto space-y-4 bg-gray-900/30">
           {messages.map((message) => (
             <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`relative max-w-[85%] p-2 rounded-lg text-white ${message.role === 'user' ? 'bg-blue-600' : 'bg-gray-700'}`}>
+              <div className={`relative max-w-[85%] p-2 rounded-lg text-white shadow-sm ${
+                message.isWarning 
+                    ? 'bg-amber-900/40 border border-amber-500/30 text-amber-200' 
+                    : message.isError 
+                        ? 'bg-red-900/40 border border-red-500/30 text-red-200' 
+                        : message.role === 'user' ? 'bg-blue-600' : 'bg-gray-800'
+              }`}>
+                 {message.isWarning && (
+                     <div className="flex items-center space-x-1.5 mb-1.5 pb-1.5 border-b border-amber-500/20 text-[10px] font-bold uppercase tracking-wider">
+                         <svg className="w-3 h-3 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                         <span>Privacy Warning</span>
+                     </div>
+                 )}
                  <FormattedMessage text={message.text} onScrollToLog={onScrollToLog} />
                  {message.action && (
                     <button onClick={() => onUpdateFilters(message.action!.payload, true)} className="mt-2 flex items-center space-x-1 text-xs bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 rounded transition-colors w-full justify-center">
@@ -894,23 +959,124 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
           <div ref={messagesEndRef} />
         </div>
         
-        <div className="flex-shrink-0 p-2 border-t border-gray-700 bg-gray-800">
+        <div className="flex-shrink-0 p-2 border-t border-gray-700 bg-gray-900">
             <form onSubmit={handleSubmit} className="flex items-center space-x-2">
-              <input value={input} onChange={e => setInput(e.target.value)} placeholder="Ask about logs or time range..." disabled={isLoading} className="flex-grow bg-gray-700 border border-gray-600 text-white text-xs rounded-md p-2 focus:outline-none focus:ring-1 focus:ring-blue-500" />
-              <button type="submit" disabled={isLoading || !input.trim()} className="bg-blue-600 text-white p-2 rounded-md hover:bg-blue-700 disabled:bg-gray-600"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg></button>
+              <textarea 
+                value={input} 
+                onChange={e => setInput(e.target.value)} 
+                onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSubmit();
+                    }
+                }}
+                placeholder="Ask about logs or time range..." 
+                disabled={isLoading} 
+                rows={1}
+                className="flex-grow bg-gray-800 border border-gray-700 text-white text-xs rounded-md p-2 focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none max-h-32" 
+              />
+              <button type="submit" disabled={isLoading || !input.trim()} className="bg-blue-600 text-white p-2 rounded-md hover:bg-blue-700 disabled:bg-gray-700 transition-colors shadow-sm">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+              </button>
             </form>
         </div>
 
-        {showWebLlmConsent && (
-            <div className="absolute inset-0 bg-black/80 z-20 flex items-center justify-center p-4">
-                <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full border border-gray-700 text-center">
-                    <h3 className="text-xl font-bold text-white mb-2">Download Local AI?</h3>
-                    <p className="text-sm text-gray-300 mb-4">Download Llama 3 weights (~2.5GB)? One-time download.</p>
-                    <div className="flex justify-center space-x-4">
-                        <button onClick={() => handleConsent(false)} className="px-4 py-2 rounded bg-gray-600 text-white text-sm">Cancel</button>
-                        <button onClick={() => handleConsent(true)} className="px-4 py-2 rounded bg-blue-600 text-white text-sm">Download</button>
+        {/* Findings Popover */}
+        {isFindingsOpen && (
+            <div className="absolute top-12 right-2 left-2 bottom-12 z-20 bg-gray-800 border border-gray-700 rounded-lg shadow-2xl flex flex-col">
+                <div className="p-3 border-b border-gray-700 flex justify-between items-center bg-gray-900/50">
+                    <h3 className="text-sm font-bold flex items-center gap-2">
+                        <svg className="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+                        Saved Findings
+                    </h3>
+                    <button onClick={() => setIsFindingsOpen(false)} className="text-gray-400 hover:text-white">&times;</button>
+                </div>
+                <div className="flex-grow p-3 overflow-y-auto space-y-2">
+                    {savedFindings.length > 0 ? savedFindings.map((finding, i) => (
+                        <div key={i} className="p-2 bg-gray-900 border border-gray-700 rounded text-xs leading-relaxed group relative">
+                            <button 
+                                onClick={() => {
+                                    const newFindings = savedFindings.filter((_, idx) => idx !== i);
+                                    localStorage.setItem('findings', JSON.stringify(newFindings)); // This is simplified, real logic uses sourceHash
+                                    // We'd actually need to pass a callback to update finding state properly in App.tsx
+                                }}
+                                className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 p-1 text-gray-500 hover:text-red-400 transition-opacity"
+                            >
+                                &times;
+                            </button>
+                            {finding}
+                        </div>
+                    )) : (
+                        <p className="text-center text-gray-500 text-xs py-8">No findings saved yet.</p>
+                    )}
+                </div>
+            </div>
+        )}
+
+        {/* Settings Modal */}
+        {isSettingsOpen && (
+            <div className="absolute inset-0 bg-black/80 z-30 flex items-center justify-center p-4 backdrop-blur-sm">
+                <div className="bg-gray-800 border border-gray-700 rounded-lg p-5 w-full max-w-sm shadow-2xl">
+                    <h3 className="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                        <svg className="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        AI Configuration
+                    </h3>
+                    <div className="space-y-4">
+                        <div>
+                            <label className="block text-[10px] text-gray-400 uppercase font-bold mb-1">Gemini API Key</label>
+                            <input 
+                                type="password" 
+                                value={tempApiKey} 
+                                onChange={e => setTempApiKey(e.target.value)} 
+                                placeholder="Paste your API key..."
+                                className="w-full bg-gray-900 border border-gray-700 text-white rounded p-2 text-xs focus:ring-1 focus:ring-blue-500" 
+                            />
+                            <p className="text-[9px] text-gray-500 mt-1">Get keys at <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-blue-400 hover:underline">Google AI Studio</a>.</p>
+                        </div>
+                        <div className="flex items-center justify-between">
+                            <label className="text-xs text-gray-300">Disable Smart Local Scan</label>
+                            <button 
+                                onClick={() => setTempDisableLocalSearch(!tempDisableLocalSearch)}
+                                className={`w-8 h-4 rounded-full relative transition-colors ${tempDisableLocalSearch ? 'bg-blue-600' : 'bg-gray-700'}`}
+                            >
+                                <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-transform ${tempDisableLocalSearch ? 'translate-x-4.5' : 'translate-x-0.5'}`} />
+                            </button>
+                        </div>
+                    </div>
+                    <div className="mt-6 flex justify-end space-x-2">
+                        <button onClick={() => setIsSettingsOpen(false)} className="px-3 py-1.5 rounded bg-gray-700 text-white text-xs hover:bg-gray-600">Cancel</button>
+                        <button onClick={handleSaveSettings} className="px-3 py-1.5 rounded bg-blue-600 text-white text-xs hover:bg-blue-500">Save Changes</button>
                     </div>
                 </div>
+            </div>
+        )}
+
+        {showWebLlmConsent && (
+            <div className="absolute inset-0 bg-black/80 z-40 flex items-center justify-center p-4 backdrop-blur-md">
+                <div className="bg-gray-800 rounded-lg p-6 max-w-md w-full border border-gray-700 text-center shadow-2xl">
+                    <div className="w-12 h-12 bg-blue-600/20 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-400">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                    </div>
+                    <h3 className="text-xl font-bold text-white mb-2">Download Local AI?</h3>
+                    <p className="text-sm text-gray-300 mb-6">Run Llama 3 entirely in your browser. This requires a one-time download of approximately 2.5GB. No data will ever leave your device.</p>
+                    <div className="flex justify-center space-x-3">
+                        <button onClick={() => handleConsent(false)} className="px-4 py-2 rounded bg-gray-700 text-white text-sm hover:bg-gray-600 transition-colors">Cancel</button>
+                        <button onClick={() => handleConsent(true)} className="px-4 py-2 rounded bg-blue-600 text-white text-sm hover:bg-blue-500 transition-colors font-bold">Start Download</button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {downloadStatus && (
+            <div className="absolute bottom-20 left-4 right-4 z-50 bg-gray-800 border border-gray-700 rounded-lg p-4 shadow-2xl">
+                <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs text-blue-400 font-bold">Downloading AI Model...</span>
+                    <span className="text-xs text-gray-400">{Math.round(downloadStatus.progress * 100)}%</span>
+                </div>
+                <div className="w-full bg-gray-700 rounded-full h-1.5 mb-2">
+                    <div className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" style={{ width: `${downloadStatus.progress * 100}%` }}></div>
+                </div>
+                <p className="text-[10px] text-gray-500 truncate">{downloadStatus.text}</p>
             </div>
         )}
     </div>

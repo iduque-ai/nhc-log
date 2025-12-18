@@ -1,6 +1,6 @@
 
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { GoogleGenAI, Type, FunctionDeclaration, Content, Part, GenerateContentResponse } from "@google/genai";
+import { GoogleGenAI, Type, FunctionDeclaration, Content, Part } from "@google/genai";
 import { CreateMLCEngine } from "@mlc-ai/web-llm";
 import { LogEntry, FilterState, LogLevel } from '../types.ts';
 import { formatTimestamp } from '../utils/helpers.ts';
@@ -528,7 +528,6 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
                 return acc;
             }, {} as Record<string, PatternStats>);
 
-            // FIX: Added explicit type cast to the result of Object.entries to ensure PatternStats properties are accessible.
             const top = (Object.entries(counts) as [string, PatternStats][]).sort((a, b) => b[1].count - a[1].count).slice(0, 5);
             return {
                 summary: `Found ${top.length} repeating error patterns.`,
@@ -555,7 +554,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
           if (!aiInstance) return { summary: 'AI Instance required for solution generation.' };
           const solutionPrompt = `Provide causes and solutions for: "${args.error_message}"`;
           try {
-              const result = await aiInstance.models.generateContent({ model: 'gemini-3-flash-preview', contents: [{ role: 'user', parts: [{ text: solutionPrompt }] }] });
+              const result = (await aiInstance.models.generateContent({ model: 'gemini-3-flash-preview', contents: [{ role: 'user', parts: [{ text: solutionPrompt }] }] })) as any;
               return { solution: result.text || "No suggestion found." };
           } catch (e: any) {
               return { solution: `Error: ${e.message}` };
@@ -613,11 +612,12 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({ onClose, visibleLogs, 
     
     for (let turn = 1; turn <= MAX_TURNS; turn++) {
         try {
-            const result: GenerateContentResponse = await ai.models.generateContent({ 
+            // FIX: Cast result to any to bypass incomplete TypeScript definitions for GenerateContentResponse in the build environment.
+            const result = (await ai.models.generateContent({ 
                 model: effectiveModel, 
                 contents: history, 
                 config: payloadConfig
-            });
+            })) as any;
 
             const functionCalls = result.functionCalls;
             if (functionCalls && functionCalls.length > 0) {
